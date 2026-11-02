@@ -49,7 +49,9 @@ The time series uses tier A only, so each point compares the same group at the s
 
 Most leaderboard wallets turn out smaller than listed and hold nothing. Polling those once a day instead of every hour cut tier B from 16.4k to 3.8k wallets, so tier B data went from up to an hour old to about 15 minutes.
 
-A run sends about 4,000 `clearinghouseState` requests at 330 a minute. That uses 55% of the 1,200 weight-per-minute limit per IP and leaves room for my other bots on the same server. A run takes about 12.5 minutes.
+A run sends about 4,000 `clearinghouseState` requests at 330 a minute. That uses 55% of the 1,200 weight-per-minute limit per IP and leaves room for my other bots on the same server. The limiter counts weight, not requests, so the heavier calls (holdings, volume, market data cost 20 each) slow the run down instead of pushing past the limit. A run takes about 13 minutes.
+
+Wallets found through trades aren't on the leaderboard, so they have no volume figure there. Each run reads the 30-day volume of up to 40 of them from the `portfolio` endpoint, largest accounts first, so they can get the market-maker label too. On the first pass 27 of the 40 largest turned out to be market makers.
 
 The leaderboard overstates account value. My guess is that it counts spot balances. Of the wallets it lists above $1M, about one in ten still clears $1M once I read the perp account. After the first poll I use my own value.
 
@@ -65,7 +67,7 @@ Each wallet gets the first label that fits:
 | Label | Rule | Source |
 |---|---|---|
 | Vault | address is a Hyperliquid vault | stats-data vault list, daily |
-| Market maker | 30-day volume ≥ 100× account value | leaderboard volume, daily |
+| Market maker | 30-day volume ≥ 100× account value | leaderboard volume, daily; the `portfolio` endpoint for wallets the leaderboard doesn't list |
 | Relative value | \|net\| / gross exposure across all coins < 0.3 | every poll |
 | Directional | everything else | |
 
@@ -93,7 +95,6 @@ No combination flips a conclusion. BTC stays short-heavy, ETH stays even, and HY
 - Hedges held off Hyperliquid don't show up. "Unhedged" means unhedged on Hyperliquid.
 - The trade stream only finds wallets that trade after the collector started. A whale that opened a position months ago and hasn't touched it since stays invisible unless it sits on the leaderboard.
 - Most discovery still depends on an unofficial endpoint. If the leaderboard changes or goes away, only the trade stream keeps adding wallets.
-- Wallets found through trades don't appear on the leaderboard, so they have no turnover figure and can't get the market-maker label.
 - Cross-margin liquidation prices depend on the whole account, so treat the liquidation map as approximate. The chart leaves out low-leverage positions with no liquidation price within ±30% and counts them in a note below it.
 - Subaccounts on the leaderboard get polled as their own addresses. I don't merge them with the master account.
 
@@ -106,6 +107,7 @@ python ingest.py 200      # cap the wallets polled, for testing
 python collector.py       # trade-stream wallet discovery; keep it running
 python backup.py          # gzip snapshot to backups/, keeps 14
 python sensitivity.py     # threshold sensitivity grid
+python healthcheck.py     # phone alert via ntfy.sh when the pipeline stops (needs NTFY_TOPIC)
 streamlit run app.py      # dashboard
 ```
 

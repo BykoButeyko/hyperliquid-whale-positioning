@@ -29,6 +29,11 @@ STORE_NOTIONAL = 10_000          # stored threshold; lower than WHALE so $50k cr
 TIER_A, TIER_B = 1_000_000, 50_000
 MAX_WALLETS = 4000               # per run, ~12 min at the rate below
 REQ_PER_MIN = 330                # x weight 2 = 660/1200 -> leaves headroom for my other bots on the same IP
+# HL weighs info requests: these cost 2, every other type 20 (userRole 60). Pacing counts weight,
+# so one portfolio call takes the slot of ten clearinghouseState calls.
+WEIGHT = {"clearinghouseState": 2, "spotClearinghouseState": 2, "allMids": 2, "l2Book": 2, "userRole": 60}
+TURN_PER_RUN = 40                # wallets per run whose 30d volume is read from the portfolio endpoint
+TURN_MAX_AGE = 86_400_000        # at most daily
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS market_snapshots(
@@ -37,7 +42,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots(
 CREATE TABLE IF NOT EXISTS wallets(
   address TEXT PRIMARY KEY, account_value REAL, first_seen INTEGER, last_checked INTEGER,
   last_error INTEGER, gross_ntl REAL, net_ntl REAL, turnover REAL, is_vault INTEGER,
-  holdings_checked INTEGER, source TEXT);
+  holdings_checked INTEGER, source TEXT, turnover_checked INTEGER);
 -- Spot + staked balance (coin units) per wallet, latest only; used to net out on-HL hedges.
 CREATE TABLE IF NOT EXISTS holdings(
   address TEXT, coin TEXT, amount REAL, PRIMARY KEY(address, coin));
@@ -149,7 +154,8 @@ def init_db(db):
                        ("wallets", "gross_ntl REAL"), ("wallets", "net_ntl REAL"),
                        ("wallets", "turnover REAL"), ("wallets", "is_vault INTEGER"),
                        ("wallets", "holdings_checked INTEGER"), ("wallets", "source TEXT"),
-                       ("positions", "label_pit TEXT"), ("positions", "hedged_pit REAL")):
+                       ("positions", "label_pit TEXT"), ("positions", "hedged_pit REAL"),
+                       ("wallets", "turnover_checked INTEGER")):
         if col.split()[0] not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     db.executescript(VIEWS)
@@ -159,11 +165,12 @@ _lock, _next = threading.Lock(), [0.0]
 
 
 def info(body):
-    """POST /info with a global pacing limiter and retry on 429/5xx."""
+    """POST /info with a global weight-based pacing limiter and retry on 429/5xx."""
+    slot = 60 / REQ_PER_MIN * WEIGHT.get(body["type"], 20) / 2
     for attempt in range(4):
         with _lock:
             wait = _next[0] - time.monotonic()
-            _next[0] = max(_next[0], time.monotonic()) + 60 / REQ_PER_MIN
+            _next[0] = max(_next[0], time.monotonic()) + slot
         if wait > 0:
             time.sleep(wait)
         r = session.post(INFO, json=body, timeout=15)
@@ -230,6 +237,38 @@ def refresh_holdings(db, now, pool):
             continue
         db.executemany("INSERT OR REPLACE INTO holdings VALUES(?,?,?)", [(addr, c, a) for c, a in held.items()])
         db.execute("UPDATE wallets SET holdings_checked=? WHERE address=?", (now, addr))
+        done += 1
+    db.commit()
+    return done
+
+
+def fetch_turnover(addr):
+    """30d volume / account value from the portfolio endpoint, for wallets the leaderboard doesn't list."""
+    try:
+        month = dict(info({"type": "portfolio", "user": addr}))["month"]
+        acct = float(month["accountValueHistory"][-1][1]) if month["accountValueHistory"] else 0.0
+        return addr, float(month["vlm"]), acct
+    except Exception:
+        return addr, None, None
+
+
+def refresh_turnover(db, now, pool):
+    """Trade-stream wallets (and any without leaderboard volume) holding a whale position: fill in
+    turnover so they can get the market-maker label. Largest accounts first, at most daily."""
+    rows = db.execute(
+        "SELECT DISTINCT w.address, w.account_value FROM latest_positions p JOIN wallets w ON w.address = p.address "
+        "WHERE p.position_value >= ? AND (w.source = 'trades' OR w.turnover IS NULL) "
+        "AND COALESCE(w.turnover_checked, 0) < ? "
+        "ORDER BY COALESCE(w.turnover_checked, 0), w.account_value DESC LIMIT ?",
+        (WHALE_NOTIONAL, now - TURN_MAX_AGE, TURN_PER_RUN)).fetchall()
+    polled_acct = dict(rows)
+    done = 0
+    for addr, vlm, acct in pool.map(fetch_turnover, polled_acct):
+        if vlm is None:
+            continue
+        # Same basis as the leaderboard (portfolio account value); fall back to the polled value.
+        db.execute("UPDATE wallets SET turnover=?, turnover_checked=? WHERE address=?",
+                   (vlm / max(acct or polled_acct[addr] or 0, 1), now, addr))
         done += 1
     db.commit()
     return done
@@ -306,6 +345,7 @@ def main():
                 print(f"{polled} polled, {time.time() - t0:.0f}s", flush=True)
         db.commit()
         print(f"holdings refreshed: {refresh_holdings(db, now, pool)} wallets", flush=True)
+        print(f"turnover refreshed: {refresh_turnover(db, now, pool)} wallets", flush=True)
 
     # Stamp this run's labels and hedges so history keeps what was known at the time.
     db.execute(f"UPDATE positions AS p SET label_pit = {LABEL_SQL}, hedged_pit = {HEDGE_SQL} "

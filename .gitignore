@@ -7,3 +7,4 @@ __pycache__/
 *.db-wal
 *.db-shm
 backups/
+.health_state
