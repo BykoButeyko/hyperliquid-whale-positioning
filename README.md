@@ -25,7 +25,8 @@ All of this comes from a day and a half of a quiet market. Read it as a descript
 - **Tier-A time series:** long and short notional, short share
 - **Open interest and funding**, each on its own chart
 - **Who holds the positions:** notional by wallet label, shorts to the left, longs to the right
-- **Liquidation map:** notional at liquidation price within ±30% of mark
+- **Liquidation map:** price next to the notional that gets liquidated at each level, within ±30% of mark
+- **Profitable wallets:** short share of directional accounts with $1M+ all-time and positive 30-day PnL, stamped each run so the history never picks winners in hindsight
 - **Tier-B breadth** and the largest positions, with links to hypurrscan
 
 ## Method
@@ -110,6 +111,7 @@ python backup.py          # gzip snapshot to backups/, keeps 14
 python sensitivity.py     # threshold sensitivity grid
 python healthcheck.py     # phone alert via ntfy.sh when the pipeline stops (needs NTFY_TOPIC)
 python alerts.py          # research alerts after each run: positioning shifts, $10M+ whale trades
+python event_study.py     # forward returns after positioning signals vs random timestamps
 streamlit run app.py      # dashboard
 ```
 

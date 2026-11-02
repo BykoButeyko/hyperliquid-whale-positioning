@@ -3,7 +3,8 @@
 - the unhedged short share of $1M+ accounts moves SHIFT_PP or more within an hour
 - a $1M+ account adds or cuts BIG_MOVE or more in one coin between two snapshots
 
-Sends to NTFY_RESEARCH_TOPIC (without it, only prints). Runs after ingest (ExecStartPost); each snapshot is checked once.
+Sends to NTFY_RESEARCH_TOPIC (without it, only prints). Runs after ingest (ExecStartPost); each snapshot is checked once. Every crossing also goes
+into the signals table for event_study.py.
   python alerts.py
 """
 import json, os, sqlite3
@@ -26,8 +27,9 @@ def usd(x):
     return f"${x / 1e6:.0f}M" if abs(x) >= 1e6 else f"${x / 1e3:.0f}k"
 
 
-def shifts(db, now, sent):
-    """sent: {coin: [ts, share]} of earlier shift alerts; updated in place."""
+def shifts(db, now, sent, log):
+    """sent: {coin: [ts, share]} of earlier shift alerts; updated in place.
+    log: gets (coin, kind, value, address, sent) for every crossing, for the event study."""
     hour_ago = db.execute("SELECT MAX(ts) FROM series_a WHERE ts <= ?", (now - 3_600_000 + 120_000,)).fetchone()[0]
     if not hour_ago:
         return []
@@ -42,7 +44,9 @@ def shifts(db, now, sent):
             continue
         # One move shows up in four hourly windows; alert again only if it kept going.
         last = sent.get(coin)
-        if last and now - last[0] < COOLDOWN and abs(v - last[1]) * 100 < SHIFT_PP:
+        fresh = not (last and now - last[0] < COOLDOWN and abs(v - last[1]) * 100 < SHIFT_PP)
+        log.append((coin, "shift", (v - then[coin][0]) * 100, None, int(fresh)))
+        if not fresh:
             continue
         sent[coin] = [now, v]
         out.append(f"{coin}: $1M+ accounts went from {then[coin][0]:.0%} to {v:.0%} short (unhedged) "
@@ -50,7 +54,7 @@ def shifts(db, now, sent):
     return out
 
 
-def big_moves(db, now):
+def big_moves(db, now, log):
     prev = db.execute("SELECT MAX(ts) FROM runs WHERE ts < ?", (now,)).fetchone()[0]
     if not prev:
         return []
@@ -69,6 +73,7 @@ def big_moves(db, now):
     for addr, coin, d, v, label, lev in rows:
         if abs(d) < BIG_MOVE:
             break
+        log.append((coin, "big_trade", d, addr, 1))
         side = "short" if d < 0 else "long"
         what = f"added {usd(abs(d))} {side}" if (v or 0) * d > 0 else f"cut {usd(abs(d))} of a position"
         now_txt = f"now {usd(abs(v))} {'short' if v < 0 else 'long'}, {label}, {lev:.0f}x" if v else "now flat"
@@ -78,18 +83,23 @@ def big_moves(db, now):
 
 def main():
     topic = os.environ.get("NTFY_RESEARCH_TOPIC")     # unset: print only
-    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    db = sqlite3.connect(DB, timeout=30)
     now = db.execute("SELECT MAX(ts) FROM runs").fetchone()[0]
     state = json.loads(STATE.read_text()) if STATE.exists() else {"ts": 0, "sent": {}}
     if not now or state["ts"] == now:
         return
-    for title, lines in (("Positioning shift", shifts(db, now, state["sent"])),
-                         ("Large whale trades", big_moves(db, now))):
+    log = []
+    for title, lines in (("Positioning shift", shifts(db, now, state["sent"], log)),
+                         ("Large whale trades", big_moves(db, now, log))):
         if lines and topic:
             requests.post(f"https://ntfy.sh/{topic}", data="\n\n".join(lines).encode(),
                           headers={"Title": title, "Tags": "whale"}, timeout=10)
         if lines:
             print(title, *lines, sep="\n  ")
+    px = dict(db.execute("SELECT coin, mark_px FROM market_snapshots WHERE ts = ?", (now,)).fetchall())
+    db.executemany("INSERT INTO signals VALUES(?,?,?,?,?,?,?)",
+                   [(now, coin, kind, value, addr, px.get(coin), sent) for coin, kind, value, addr, sent in log])
+    db.commit()
     state["ts"] = now
     STATE.write_text(json.dumps(state))
 

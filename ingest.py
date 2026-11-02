@@ -34,6 +34,8 @@ REQ_PER_MIN = 330                # x weight 2 = 660/1200 -> leaves headroom for 
 WEIGHT = {"clearinghouseState": 2, "spotClearinghouseState": 2, "allMids": 2, "l2Book": 2, "userRole": 60}
 TURN_PER_RUN = 40                # wallets per run whose 30d volume is read from the portfolio endpoint
 TURN_MAX_AGE = 86_400_000        # at most daily
+# "Profitable" cohort: all-time PnL at least this and positive over the last 30 days. Picked by hand.
+SMART_PNL = 1_000_000
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS market_snapshots(
@@ -42,7 +44,8 @@ CREATE TABLE IF NOT EXISTS market_snapshots(
 CREATE TABLE IF NOT EXISTS wallets(
   address TEXT PRIMARY KEY, account_value REAL, first_seen INTEGER, last_checked INTEGER,
   last_error INTEGER, gross_ntl REAL, net_ntl REAL, turnover REAL, is_vault INTEGER,
-  holdings_checked INTEGER, source TEXT, turnover_checked INTEGER, prev_checked INTEGER);
+  holdings_checked INTEGER, source TEXT, turnover_checked INTEGER, prev_checked INTEGER,
+  pnl_all REAL, pnl_month REAL);
 -- Spot + staked balance (coin units) per wallet, latest only; used to net out on-HL hedges.
 CREATE TABLE IF NOT EXISTS holdings(
   address TEXT, coin TEXT, amount REAL, PRIMARY KEY(address, coin));
@@ -53,6 +56,9 @@ CREATE TABLE IF NOT EXISTS positions(
 CREATE TABLE IF NOT EXISTS runs(
   ts INTEGER PRIMARY KEY, wallets_polled INTEGER, errors INTEGER, duration_s REAL);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+-- Every threshold crossing alerts.py sees (before its cooldown), with the price at the time.
+CREATE TABLE IF NOT EXISTS signals(
+  ts INTEGER, coin TEXT, kind TEXT, value REAL, address TEXT, mark_px REAL, sent INTEGER);
 """
 
 # Classification rules, shared by the classified view and the per-run stamp (aliases: p, w).
@@ -64,6 +70,9 @@ LABEL_SQL = f"""CASE WHEN w.is_vault = 1 THEN 'vault'
 HEDGE_SQL = """CASE WHEN p.szi < 0 THEN MIN(COALESCE((SELECT amount FROM holdings h
            WHERE h.address = p.address AND h.coin = p.coin), 0), -p.szi) * p.position_value / -p.szi
          ELSE 0 END"""
+# Profitable-wallet cohort, stamped per run only: using today's PnL on old rows would pick
+# winners with hindsight.
+SMART_SQL = f"CASE WHEN w.pnl_all >= {SMART_PNL} AND w.pnl_month > 0 THEN 1 ELSE 0 END"
 
 VIEWS = f"""
 DROP VIEW IF EXISTS latest_positions;
@@ -105,7 +114,12 @@ CREATE VIEW series_a AS
     SUM(CASE WHEN szi > 0 AND label = 'directional' THEN position_value ELSE 0 END) AS dir_long_ntl,
     SUM(CASE WHEN szi < 0 AND label = 'directional' THEN position_value - hedged_ntl ELSE 0 END)
       AS dir_short_ntl,
-    COUNT(*) AS n_wallets
+    COUNT(*) AS n_wallets,
+    -- profitable directional wallets (stamped since 2026-11-03), shorts net of hedges
+    SUM(CASE WHEN szi > 0 AND label = 'directional' AND smart_pit = 1 THEN position_value ELSE 0 END)
+      AS smart_long_ntl,
+    SUM(CASE WHEN szi < 0 AND label = 'directional' AND smart_pit = 1 THEN position_value - hedged_ntl
+        ELSE 0 END) AS smart_short_ntl
   FROM classified
   WHERE acct_value >= {TIER_A} AND position_value >= {WHALE_NOTIONAL}
   GROUP BY ts, coin;
@@ -155,7 +169,9 @@ def init_db(db):
                        ("wallets", "turnover REAL"), ("wallets", "is_vault INTEGER"),
                        ("wallets", "holdings_checked INTEGER"), ("wallets", "source TEXT"),
                        ("positions", "label_pit TEXT"), ("positions", "hedged_pit REAL"),
-                       ("wallets", "turnover_checked INTEGER"), ("wallets", "prev_checked INTEGER")):
+                       ("wallets", "turnover_checked INTEGER"), ("wallets", "prev_checked INTEGER"),
+                       ("wallets", "pnl_all REAL"), ("wallets", "pnl_month REAL"),
+                       ("positions", "smart_pit INTEGER")):
         if col.split()[0] not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     db.executescript(VIEWS)
@@ -202,9 +218,10 @@ def refresh_profiles(db, now):
     if last and now - int(last[0]) < 86_400_000:
         return
     rows = session.get(LEADERBOARD, timeout=60).json()["leaderboardRows"]
-    db.executemany("UPDATE wallets SET turnover=? WHERE address=?",
-                   [(float(dict(r["windowPerformances"])["month"]["vlm"]) / max(float(r["accountValue"]), 1),
-                     r["ethAddress"]) for r in rows])
+    perf = [(dict(r["windowPerformances"]), float(r["accountValue"]), r["ethAddress"]) for r in rows]
+    db.executemany("UPDATE wallets SET turnover=?, pnl_all=?, pnl_month=? WHERE address=?",
+                   [(float(w["month"]["vlm"]) / max(acct, 1), float(w["allTime"]["pnl"]),
+                     float(w["month"]["pnl"]), addr) for w, acct, addr in perf])
     vaults = {v["summary"]["vaultAddress"].lower() for v in session.get(VAULTS, timeout=60).json()}
     db.execute("UPDATE wallets SET is_vault=0")
     db.executemany("UPDATE wallets SET is_vault=1 WHERE lower(address)=?", [(v,) for v in vaults])
@@ -245,11 +262,12 @@ def refresh_holdings(db, now, pool):
 def fetch_turnover(addr):
     """30d volume / account value from the portfolio endpoint, for wallets the leaderboard doesn't list."""
     try:
-        month = dict(info({"type": "portfolio", "user": addr}))["month"]
-        acct = float(month["accountValueHistory"][-1][1]) if month["accountValueHistory"] else 0.0
-        return addr, float(month["vlm"]), acct
+        windows = dict(info({"type": "portfolio", "user": addr}))
+        month, all_time = windows["month"], windows["allTime"]
+        last = lambda h: float(h[-1][1]) if h else 0.0
+        return addr, float(month["vlm"]), last(month["accountValueHistory"]),             last(all_time["pnlHistory"]), last(month["pnlHistory"])
     except Exception:
-        return addr, None, None
+        return addr, None, None, None, None
 
 
 def refresh_turnover(db, now, pool):
@@ -263,12 +281,12 @@ def refresh_turnover(db, now, pool):
         (WHALE_NOTIONAL, now - TURN_MAX_AGE, TURN_PER_RUN)).fetchall()
     polled_acct = dict(rows)
     done = 0
-    for addr, vlm, acct in pool.map(fetch_turnover, polled_acct):
+    for addr, vlm, acct, pnl_all, pnl_month in pool.map(fetch_turnover, polled_acct):
         if vlm is None:
             continue
         # Same basis as the leaderboard (portfolio account value); fall back to the polled value.
-        db.execute("UPDATE wallets SET turnover=?, turnover_checked=? WHERE address=?",
-                   (vlm / max(acct or polled_acct[addr] or 0, 1), now, addr))
+        db.execute("UPDATE wallets SET turnover=?, turnover_checked=?, pnl_all=?, pnl_month=? WHERE address=?",
+                   (vlm / max(acct or polled_acct[addr] or 0, 1), now, pnl_all, pnl_month, addr))
         done += 1
     db.commit()
     return done
@@ -349,7 +367,7 @@ def main():
         print(f"turnover refreshed: {refresh_turnover(db, now, pool)} wallets", flush=True)
 
     # Stamp this run's labels and hedges so history keeps what was known at the time.
-    db.execute(f"UPDATE positions AS p SET label_pit = {LABEL_SQL}, hedged_pit = {HEDGE_SQL} "
+    db.execute(f"UPDATE positions AS p SET label_pit = {LABEL_SQL}, hedged_pit = {HEDGE_SQL}, smart_pit = {SMART_SQL} "
                "FROM wallets w WHERE w.address = p.address AND p.ts = ?", (now,))
 
     db.execute("INSERT INTO runs VALUES(?,?,?,?)", (now, polled, errors, round(time.time() - t0, 1)))

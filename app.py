@@ -3,7 +3,9 @@ import sqlite3
 import time
 
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from explain import explain
@@ -11,6 +13,7 @@ from ingest import COINS, DB, MM_TURNOVER, RELVAL_RATIO, TIER_A, WHALE_NOTIONAL
 
 # Dark palette (blue/red diverging pair: CVD-safe, unlike green/red).
 LONG, SHORT = "#3987e5", "#e66767"
+PROFIT = "#e0a43a"   # profitable-wallet cohort; also dashed, so it never relies on color alone
 SURFACE, GRID, AXIS, INK, INK2, MUTED = "#1a1a19", "#2c2c2a", "#383835", "#f0efec", "#c3c2b7", "#898781"
 LABELS = {"directional": "Directional", "hedged_on_hl": "Hedged on HL", "relative_value": "Relative value",
           "market_maker": "Market maker", "vault": "Vault"}
@@ -93,6 +96,8 @@ series = q("SELECT * FROM series_a ORDER BY ts")
 series["dt"] = pd.to_datetime(series.ts, unit="ms", utc=True)
 series["raw_share"] = series.short_ntl / (series.long_ntl + series.short_ntl)
 series["dir_share"] = series.dir_short_ntl / (series.dir_long_ntl + series.dir_short_ntl)
+smart_tot = series.smart_long_ntl + series.smart_short_ntl
+series["smart_share"] = (series.smart_short_ntl / smart_tot).where(smart_tot > 0)
 market = q("SELECT ts, coin, mark_px, funding, open_interest * mark_px AS oi_ntl FROM market_snapshots ORDER BY ts")
 market["dt"] = pd.to_datetime(market.ts, unit="ms", utc=True)
 cov = q("SELECT * FROM coverage").set_index("coin")
@@ -192,13 +197,20 @@ with right:
                     hovertemplate="%{y:.1%}<extra>" + other_name.lower() + "</extra>")
     fig.add_scatter(x=s.dt, y=s[SHARE], name=mode, mode=mk_mode, marker=dict(size=8),
                     line=dict(color=INK, width=2), hovertemplate="%{y:.1%}<extra>" + mode.lower() + "</extra>")
-    lo, hi = min(s[SHARE].min(), s[OTHER].min()), max(s[SHARE].max(), s[OTHER].max())
+    cols = [SHARE, OTHER]
+    if s.smart_share.notna().any():
+        fig.add_scatter(x=s.dt, y=s.smart_share, name="Profitable", mode=mk_mode, marker=dict(size=8),
+                        line=dict(color=PROFIT, width=1.5, dash="dash"), connectgaps=False,
+                        hovertemplate="%{y:.1%}<extra>profitable wallets</extra>")
+        cols.append("smart_share")
+    lo, hi = s[cols].min().min(), s[cols].max().max()
     lo, hi = max(lo - 0.05, 0), min(hi + 0.05, 1)
     if lo < 0.5 < hi:
         fig.add_hline(y=0.5, line=dict(color=AXIS, width=1))
     fig.update_yaxes(tickformat=".0%", range=[lo, hi])
     chart(style(fig, 340, f"{coin} short share"))
-    how("Share of that value that is short; above 50% means more short than long. The dotted line shows the other measure.")
+    how("Share of that value that is short; above 50% means more short than long. The dotted line shows the other "
+        "measure. Profitable: directional accounts with $1M+ all-time and positive 30-day PnL, unhedged.")
 
 if few:
     st.caption("Time series need at least two snapshots. History builds up every 15 minutes.")
@@ -247,18 +259,30 @@ pos = q("SELECT * FROM latest_classified WHERE coin = ? AND position_value >= ?"
 mark = m.iloc[-1].mark_px if not m.empty else None
 if mark and not pos.empty:
     liq = pos[pos.liq_px.between(mark * 0.7, mark * 1.3)]
-    fig = go.Figure()
+    step = mark * 0.01
+    edges = np.arange(mark * 0.7, mark * 1.3 + step, step)
+    centers = (edges[:-1] + edges[1:]) / 2
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[0.62, 0.38], horizontal_spacing=0.02)
+    fig.add_scatter(x=m.dt, y=m.mark_px, name="Price", mode=mk_mode, line=dict(color=INK, width=1.5),
+                    marker=dict(size=6), hovertemplate="%{y:,.2f}<extra>price</extra>", row=1, col=1)
     for name, side, color in (("Long liquidations", liq.szi > 0, LONG), ("Short liquidations", liq.szi < 0, SHORT)):
-        fig.add_histogram(x=liq[side].liq_px, y=liq[side].position_value, histfunc="sum", name=name,
-                          xbins=dict(start=mark * 0.7, end=mark * 1.3, size=mark * 0.01),
-                          marker=dict(color=color, line=dict(color=SURFACE, width=1)),
-                          hovertemplate="%{x}<br>%{y:$.3s}<extra>" + name + "</extra>")
-    fig.add_vline(x=mark, line=dict(color=INK, dash="dot"),
-                  annotation=dict(text=f"mark ${mark:,.2f}", font=dict(color=INK2)))
-    fig.update_layout(barmode="overlay", bargap=0.05, hovermode="closest")
-    chart(style(fig, 320, f"{coin} liquidation map (notional at liquidation price, ±30% of mark)",
-                time_axis=False))
-    how("If price reaches a bar, those positions get force-closed. Large clusters can speed a move up as the forced orders hit the book.")
+        ntl = np.histogram(liq[side].liq_px, bins=edges, weights=liq[side].position_value)[0]
+        fig.add_bar(y=centers, x=ntl, orientation="h", width=step * 0.9, name=name, marker_color=color,
+                    hovertemplate="%{y:,.2f}<br>%{x:$.3s}<extra>" + name + "</extra>", row=1, col=2)
+    fig.add_hline(y=mark, line=dict(color=INK2, dash="dot", width=1))
+    fig.add_annotation(text=f"mark ${mark:,.2f}", y=mark, x=1, xref="paper", xanchor="right", yanchor="bottom",
+                       showarrow=False, font=dict(color=INK2, size=11))
+    # Show the price history plus every 1% bucket that holds liquidations, nothing emptier.
+    held = np.concatenate([centers[np.histogram(liq.liq_px, bins=edges)[0] > 0], m.mark_px.values, [mark]])
+    pad = step * 2
+    fig.update_layout(barmode="overlay", hovermode="closest", bargap=0)
+    style(fig, 400, f"{coin} price and liquidation levels")
+    fig.update_yaxes(range=[held.min() - pad, held.max() + pad], tickformat=",.0f" if mark > 100 else ",.2f")
+    fig.update_xaxes(tickformat="$.2s", hoverformat="$.3s", row=1, col=2)   # style() set dates on both
+    chart(fig)
+    how("Left: price over the selected range. Right: value of positions that get force-closed if price reaches that "
+        "level, in 1% buckets within ±30% of the price; longs sit below it, shorts above. Large clusters can speed a "
+        "move up as the forced orders hit the book.")
     st.caption(f"Not shown: {len(pos) - len(liq)} positions with no liquidation price within ±30% "
                "(low leverage or cross margin).")
 
