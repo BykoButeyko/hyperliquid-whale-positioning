@@ -96,7 +96,7 @@ st.markdown(f"<div class='title'>Hyperliquid Whale Positioning</div>"
             f"{n_tracked:,} wallets tracked · updated {updated} ({age_min:.0f} min ago)</div>",
             unsafe_allow_html=True)
 
-c1, c2, _ = st.columns([2, 2, 3])
+c1, c2, c3, _ = st.columns([2, 2, 2, 1])
 with c1:
     mode = st.segmented_control(
         "Measure", ["Unhedged", "Raw"], default="Unhedged",
@@ -104,6 +104,10 @@ with c1:
              "spot and staked holdings of the same coin on Hyperliquid. Raw: every tracked position.") or "Unhedged"
 with c2:
     coin = st.segmented_control("Coin", COINS, default=COINS[0]) or COINS[0]
+with c3:
+    RANGES = {"24h": 1, "7d": 7, "30d": 30, "All": None}
+    span = st.segmented_control("Range", list(RANGES), default="7d",
+                                help="Time window for the charts. Cards always show the latest snapshot.") or "7d"
 DIR = mode == "Unhedged"
 L, S, SHARE, OTHER = (("dir_long_ntl", "dir_short_ntl", "dir_share", "raw_share") if DIR
                       else ("long_ntl", "short_ntl", "raw_share", "dir_share"))
@@ -140,6 +144,9 @@ for col, c in zip(st.columns(len(COINS)), COINS):
     </div>""" if cv is not None else "", unsafe_allow_html=True)
 
 s, m = series[series.coin == coin], market[market.coin == coin]
+if RANGES[span]:
+    since = run.ts - RANGES[span] * 86_400_000
+    s, m = s[s.ts >= since], m[m.ts >= since]
 few = len(s) < 2
 mk_mode = "lines+markers" if few else "lines"
 st.write("")
@@ -250,13 +257,14 @@ if not pos.empty:
     })
 
 st.markdown(f"""<div class='method'><b>Method</b><ul>
-<li>Wallets come from the public Hyperliquid leaderboard. Wallets that are not on it are invisible; "tracked" shows the
-share of open interest this sample covers (long + short over both sides of OI).</li>
-<li>Accounts ≥ {usd(TIER_A)} are polled every 15 minutes and drive the time series. Smaller accounts rotate and can be up
-to about an hour old.</li>
+<li>Wallets come from the public Hyperliquid leaderboard, plus any address that trades $50k or more in a day on the live
+trade stream. "Tracked" shows the share of open interest this sample covers (long + short over both sides of OI).</li>
+<li>Accounts ≥ {usd(TIER_A)} are polled every 15 minutes and drive the time series. Smaller accounts rotate and are
+usually one run behind.</li>
 <li><b>Unhedged</b> drops vaults, market makers (30-day volume ≥ {MM_TURNOVER}× account value) and relative-value books
 (|net| / gross exposure across all coins &lt; {RELVAL_RATIO}), and nets shorts against spot and staked holdings of the same
 coin on Hyperliquid. The turnover distribution has no natural break, so the market-maker cut is a judgment call.</li>
-<li>Labels use each wallet's current profile, also for past snapshots. Hedges held off Hyperliquid (exchange spot, ETFs,
-other chains) don't show up, so "unhedged" means unhedged on Hyperliquid.</li>
+<li>Labels and hedges are stamped at each snapshot. Results hold across market-maker cuts from 30× to none (see README).
+Hedges held off Hyperliquid (exchange spot, ETFs, other chains) don't show up, so "unhedged" means unhedged on
+Hyperliquid.</li>
 </ul></div>""", unsafe_allow_html=True)

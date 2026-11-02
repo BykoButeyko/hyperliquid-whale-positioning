@@ -33,16 +33,21 @@ All of this comes from a day and a half of a quiet market. Read it as a descript
 
 Hyperliquid has no endpoint that returns all positions. I take candidate addresses from the public leaderboard (`stats-data.hyperliquid.xyz/Mainnet/leaderboard`, about 48k addresses, refreshed daily) and track every wallet it puts at $50k or more, about 16.6k.
 
-Wallets missing from the leaderboard stay invisible. To show what that costs, each coin reports coverage: tracked whale notional (long + short) over both sides of open interest. Right now coverage sits between 39% and 45%.
+The leaderboard misses wallets, so a second process (`collector.py`) listens to the BTC, ETH, SOL and HYPE trade stream. Every trade names both counterparties, and any address that trades $50k or more in a UTC day joins the tracked set. In a three-minute test, 23 new addresses came in. Four of them were $1M+ accounts, holding $82M of BTC positions the leaderboard never showed me.
+
+Each coin reports coverage so you can see how much is still missing: tracked whale notional (long + short) over both sides of open interest. Before the trade stream it sat between 39% and 45%.
 
 ### Polling
 
 | Tier | Definition | Polled | Wallets |
 |---|---|---|---|
 | A | perp account value ≥ $1M | every run (15 min) | ~275 |
-| B | all other tracked wallets | stalest first, up to 4,000 requests per run | full cycle in about an hour |
+| B | other wallets with $50k+ equity or an open position | stalest first, up to 4,000 requests per run | about every run |
+| idle | accounts under $50k with no position | once a day | ~12.5k |
 
 The time series uses tier A only, so each point compares the same group at the same freshness. Tier B gets its own breadth panel with its data age.
+
+Most leaderboard wallets turn out smaller than listed and hold nothing. Polling those once a day instead of every hour cut tier B from 16.4k to 3.8k wallets, so tier B data went from up to an hour old to about 15 minutes.
 
 A run sends about 4,000 `clearinghouseState` requests at 330 a minute. That uses 55% of the 1,200 weight-per-minute limit per IP and leaves room for my other bots on the same server. A run takes about 12.5 minutes.
 
@@ -66,13 +71,29 @@ Each wallet gets the first label that fits:
 
 **Hedges on Hyperliquid.** For each short I count the wallet's spot balance in the same asset (UBTC, UETH, USOL, HYPE), plus staked and unstaking HYPE. The covered part shows up as *hedged on HL* and comes off the directional short. Holdings only offset shorts. I don't add them to longs, because I'm measuring perp positioning. Holdings refresh once a day for wallets with a whale-size short.
 
+I also checked two places a hedge could hide. HYPE liquid staking tokens (KHYPE, STHYPE and others) add nothing: the wallets with HYPE shorts hold none. Subaccounts whose master wallet holds the spot add $0.2M against $1.35B of BTC shorts. Neither changes a number, so the code leaves them out.
+
+**Labels are stamped at the time of each snapshot.** At the end of every run the ingest writes each position's label and hedged notional into the row, so a wallet that starts market making next month doesn't rewrite last month's chart. Snapshots taken before 2026-11-02 13:45 UTC didn't have this yet and use the labels from that day.
+
 **I picked the 100× market-maker cut by hand.** Turnover among wallets with $50k+ positions follows one smooth, log-normal curve, with no gap between market makers and active traders. 100× catches the top 8% or so. I chose the 0.3 relative-value cut the same way.
+
+To check whether those choices drive the results, `sensitivity.py` reruns the tier-A numbers over a grid of six market-maker cuts (30× to no filter) and four relative-value cuts (0.2 to no filter). On the 2026-11-02 snapshot:
+
+| Coin | Raw short share | Unhedged, across all 24 combinations |
+|---|---|---|
+| BTC | 59.2% | 57.6% to 62.0% |
+| ETH | 49.0% | 47.3% to 50.2% |
+| SOL | 54.3% | 48.5% to 54.6% |
+| HYPE | 50.2% | 22.1% to 30.3% |
+
+No combination flips a conclusion. BTC stays short-heavy, ETH stays even, and HYPE stays far below its raw figure, because hedges drive that gap and the thresholds move it by a few points at most.
 
 ### Limitations
 
 - Hedges held off Hyperliquid don't show up. "Unhedged" means unhedged on Hyperliquid.
-- Labels describe each wallet as it is today. The time series applies current labels and holdings to older snapshots.
-- Wallet discovery depends on an unofficial endpoint. If the leaderboard changes or goes away, discovery stops.
+- The trade stream only finds wallets that trade after the collector started. A whale that opened a position months ago and hasn't touched it since stays invisible unless it sits on the leaderboard.
+- Most discovery still depends on an unofficial endpoint. If the leaderboard changes or goes away, only the trade stream keeps adding wallets.
+- Wallets found through trades don't appear on the leaderboard, so they have no turnover figure and can't get the market-maker label.
 - Cross-margin liquidation prices depend on the whole account, so treat the liquidation map as approximate. The chart leaves out low-leverage positions with no liquidation price within ±30% and counts them in a note below it.
 - Subaccounts on the leaderboard get polled as their own addresses. I don't merge them with the master account.
 
@@ -82,7 +103,9 @@ Each wallet gets the first label that fits:
 pip install -r requirements.txt
 python ingest.py          # one snapshot; schedule it every 15 minutes
 python ingest.py 200      # cap the wallets polled, for testing
+python collector.py       # trade-stream wallet discovery; keep it running
 python backup.py          # gzip snapshot to backups/, keeps 14
+python sensitivity.py     # threshold sensitivity grid
 streamlit run app.py      # dashboard
 ```
 
@@ -99,7 +122,7 @@ Everything lives in `hl_whales.db` (SQLite in WAL mode). Each ingest run creates
 | `coverage` | tracked notional over open interest, data age |
 | `breadth_b` | tier-B long/short, data age |
 
-I run it on a small VPS with systemd: a 15-minute timer for ingest, a daily timer for backups, and Streamlit on loopback.
+I run it on a small VPS with systemd: a 15-minute timer for ingest, a long-running collector service, a daily timer for backups, and Streamlit on loopback.
 
 ## License
 

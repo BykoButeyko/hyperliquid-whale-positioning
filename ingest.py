@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots(
 CREATE TABLE IF NOT EXISTS wallets(
   address TEXT PRIMARY KEY, account_value REAL, first_seen INTEGER, last_checked INTEGER,
   last_error INTEGER, gross_ntl REAL, net_ntl REAL, turnover REAL, is_vault INTEGER,
-  holdings_checked INTEGER);
+  holdings_checked INTEGER, source TEXT);
 -- Spot + staked balance (coin units) per wallet, latest only; used to net out on-HL hedges.
 CREATE TABLE IF NOT EXISTS holdings(
   address TEXT, coin TEXT, amount REAL, PRIMARY KEY(address, coin));
@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS runs(
   ts INTEGER PRIMARY KEY, wallets_polled INTEGER, errors INTEGER, duration_s REAL);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
+
+# Classification rules, shared by the classified view and the per-run stamp (aliases: p, w).
+LABEL_SQL = f"""CASE WHEN w.is_vault = 1 THEN 'vault'
+         WHEN w.turnover >= {MM_TURNOVER} THEN 'market_maker'
+         WHEN w.gross_ntl > 0 AND ABS(w.net_ntl) / w.gross_ntl < {RELVAL_RATIO} THEN 'relative_value'
+         ELSE 'directional' END"""
+# Part of a short covered by spot/staked holdings of the same coin (longs: 0).
+HEDGE_SQL = """CASE WHEN p.szi < 0 THEN MIN(COALESCE((SELECT amount FROM holdings h
+           WHERE h.address = p.address AND h.coin = p.coin), 0), -p.szi) * p.position_value / -p.szi
+         ELSE 0 END"""
 
 VIEWS = f"""
 DROP VIEW IF EXISTS latest_positions;
@@ -67,19 +77,14 @@ CREATE VIEW latest_positions AS
   WHERE w.last_error IS NULL OR w.last_error < w.last_checked;
 
 -- Every position with a wallet label and its on-HL hedged notional.
--- Labels use the wallet's CURRENT profile (also applied to history).
--- hedged_ntl: part of a short covered by spot/staked holdings of the same coin (longs: 0).
+-- label_pit / hedged_pit are stamped at the end of each run (point in time). Rows from before
+-- that existed fall back to the wallet's current profile.
 CREATE VIEW classified AS
   SELECT p.*,
-    CASE WHEN w.is_vault = 1 THEN 'vault'
-         WHEN w.turnover >= {MM_TURNOVER} THEN 'market_maker'
-         WHEN w.gross_ntl > 0 AND ABS(w.net_ntl) / w.gross_ntl < {RELVAL_RATIO} THEN 'relative_value'
-         ELSE 'directional' END AS label,
-    CASE WHEN p.szi < 0 THEN MIN(COALESCE(h.amount, 0), -p.szi) * p.position_value / -p.szi
-         ELSE 0 END AS hedged_ntl
+    COALESCE(p.label_pit, {LABEL_SQL}) AS label,
+    COALESCE(p.hedged_pit, {HEDGE_SQL}) AS hedged_ntl
   FROM positions p
-  JOIN wallets w ON w.address = p.address
-  LEFT JOIN holdings h ON h.address = p.address AND h.coin = p.coin;
+  JOIN wallets w ON w.address = p.address;
 
 CREATE VIEW latest_classified AS
   SELECT c.* FROM classified c
@@ -143,7 +148,8 @@ def init_db(db):
     for table, col in (("wallets", "last_error INTEGER"), ("positions", "acct_value REAL"),
                        ("wallets", "gross_ntl REAL"), ("wallets", "net_ntl REAL"),
                        ("wallets", "turnover REAL"), ("wallets", "is_vault INTEGER"),
-                       ("wallets", "holdings_checked INTEGER")):
+                       ("wallets", "holdings_checked INTEGER"), ("wallets", "source TEXT"),
+                       ("positions", "label_pit TEXT"), ("positions", "hedged_pit REAL")):
         if col.split()[0] not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     db.executescript(VIEWS)
@@ -239,13 +245,16 @@ def snapshot_market(db, now):
                         float(c["openInterest"]), float(c["dayNtlVlm"])))
 
 
-def pick_wallets(db, cap):
-    # Tier A every run, then stalest tier B (never-checked first).
+def pick_wallets(db, cap, now):
+    # Tier A every run, then stalest tier B (never-checked first). Accounts under TIER_B that held
+    # no stored position at their last poll are only rechecked daily, to keep the rotation short.
     a = [r[0] for r in db.execute(
         "SELECT address FROM wallets WHERE account_value >= ? ORDER BY account_value DESC", (TIER_A,))]
     b = [r[0] for r in db.execute(
-        "SELECT address FROM wallets WHERE account_value < ? "
-        "ORDER BY COALESCE(last_checked, 0), account_value DESC LIMIT ?", (TIER_A, max(cap - len(a), 0)))]
+        "SELECT address FROM wallets WHERE account_value < ? AND (account_value >= ? OR last_checked IS NULL "
+        "OR last_checked < ? OR address IN (SELECT address FROM latest_positions)) "
+        "ORDER BY COALESCE(last_checked, 0), account_value DESC LIMIT ?",
+        (TIER_A, TIER_B, now - 86_400_000, max(cap - len(a), 0)))]
     return (a + b)[:cap]
 
 
@@ -267,7 +276,7 @@ def main():
 
     errors, polled = 0, 0
     with ThreadPoolExecutor(8) as pool:
-        for addr, state in pool.map(fetch, pick_wallets(db, cap)):
+        for addr, state in pool.map(fetch, pick_wallets(db, cap, now)):
             if state is None:
                 errors += 1
                 db.execute("UPDATE wallets SET last_error=? WHERE address=?", (now, addr))
@@ -281,7 +290,9 @@ def main():
                 gross += v
                 net += v if float(p["szi"]) > 0 else -v
                 if p["coin"] in COINS and float(p["positionValue"]) >= STORE_NOTIONAL:
-                    db.execute("INSERT OR REPLACE INTO positions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    db.execute("INSERT OR REPLACE INTO positions(ts, address, coin, szi, entry_px, "
+                               "position_value, leverage, lev_type, liq_px, unrealized_pnl, margin_used, "
+                               "acct_value) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                                (now, addr, p["coin"], float(p["szi"]), float(p["entryPx"]),
                                 float(p["positionValue"]), p["leverage"]["value"],
                                 p["leverage"]["type"],
@@ -289,11 +300,16 @@ def main():
                                 float(p["unrealizedPnl"]), float(p["marginUsed"]), acct))
             db.execute("UPDATE wallets SET last_checked=?, account_value=?, gross_ntl=?, net_ntl=? "
                        "WHERE address=?", (now, acct, gross, net, addr))
-            if polled % 200 == 0:
+            if polled % 50 == 0:  # short write transactions so the collector can insert
                 db.commit()
+            if polled % 500 == 0:
                 print(f"{polled} polled, {time.time() - t0:.0f}s", flush=True)
         db.commit()
         print(f"holdings refreshed: {refresh_holdings(db, now, pool)} wallets", flush=True)
+
+    # Stamp this run's labels and hedges so history keeps what was known at the time.
+    db.execute(f"UPDATE positions AS p SET label_pit = {LABEL_SQL}, hedged_pit = {HEDGE_SQL} "
+               "FROM wallets w WHERE w.address = p.address AND p.ts = ?", (now,))
 
     db.execute("INSERT INTO runs VALUES(?,?,?,?)", (now, polled, errors, round(time.time() - t0, 1)))
     db.commit()
