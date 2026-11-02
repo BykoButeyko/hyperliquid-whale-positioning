@@ -34,7 +34,8 @@ REQ_PER_MIN = 330                # x weight 2 = 660/1200 -> leaves headroom for 
 WEIGHT = {"clearinghouseState": 2, "spotClearinghouseState": 2, "allMids": 2, "l2Book": 2, "userRole": 60}
 TURN_PER_RUN = 40                # wallets per run whose 30d volume is read from the portfolio endpoint
 TURN_MAX_AGE = 86_400_000        # at most daily
-# "Profitable" cohort: all-time PnL at least this and positive over the last 30 days. Picked by hand.
+# "Profitable" cohort: PnL earned before the last 30 days at least this. Picked by hand. Leaving out
+# the last 30 days keeps the pick from simply rewarding whoever sits on the side of this month's move.
 SMART_PNL = 1_000_000
 
 TABLES = """
@@ -72,7 +73,7 @@ HEDGE_SQL = """CASE WHEN p.szi < 0 THEN MIN(COALESCE((SELECT amount FROM holding
          ELSE 0 END"""
 # Profitable-wallet cohort, stamped per run only: using today's PnL on old rows would pick
 # winners with hindsight.
-SMART_SQL = f"CASE WHEN w.pnl_all >= {SMART_PNL} AND w.pnl_month > 0 THEN 1 ELSE 0 END"
+SMART_SQL = f"CASE WHEN w.pnl_all - w.pnl_month >= {SMART_PNL} THEN 1 ELSE 0 END"
 
 VIEWS = f"""
 DROP VIEW IF EXISTS latest_positions;

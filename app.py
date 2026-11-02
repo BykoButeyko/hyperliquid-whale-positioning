@@ -213,7 +213,7 @@ with right:
     fig.update_yaxes(tickformat=".0%", range=[lo, hi])
     chart(style(fig, 340, f"{coin} short share"))
     how("Share of that value that is short; above 50% means more short than long. The dotted line shows the other "
-        "measure. Profitable: directional accounts with $1M+ all-time and positive 30-day PnL, unhedged.")
+        "measure. Profitable: directional accounts that made $1M+ before the last 30 days, unhedged.")
 
 if few:
     st.caption("Time series need at least two snapshots. History builds up every 15 minutes.")

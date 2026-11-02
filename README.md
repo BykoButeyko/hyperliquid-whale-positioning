@@ -26,7 +26,7 @@ All of this comes from a day and a half of a quiet market. Read it as a descript
 - **Open interest and funding**, each on its own chart
 - **Who holds the positions:** notional by wallet label, shorts to the left, longs to the right
 - **Liquidation map:** price next to the notional that gets liquidated at each level, within ±30% of mark
-- **Profitable wallets:** short share of directional accounts with $1M+ all-time and positive 30-day PnL, stamped each run so the history never picks winners in hindsight
+- **Profitable wallets:** short share of directional accounts that made $1M+ before the last 30 days, stamped each run so the history never picks winners in hindsight. The last 30 days stay out of the pick because a "profitable this month" filter just selects whoever sat on the side of the month's move: with it, the cohort read 97% short BTC after a falling month
 - **Tier-B breadth** and the largest positions, with links to hypurrscan
 
 ## Method
@@ -112,6 +112,7 @@ python sensitivity.py     # threshold sensitivity grid
 python healthcheck.py     # phone alert via ntfy.sh when the pipeline stops (needs NTFY_TOPIC)
 python alerts.py          # research alerts after each run: positioning shifts, $10M+ whale trades
 python event_study.py     # forward returns after positioning signals vs random timestamps
+pip install pytest && pytest   # tests for the dashboard text and the alert rules
 streamlit run app.py      # dashboard
 ```
 
