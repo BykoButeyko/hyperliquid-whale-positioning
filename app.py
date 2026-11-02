@@ -96,8 +96,11 @@ series = q("SELECT * FROM series_a ORDER BY ts")
 series["dt"] = pd.to_datetime(series.ts, unit="ms", utc=True)
 series["raw_share"] = series.short_ntl / (series.long_ntl + series.short_ntl)
 series["dir_share"] = series.dir_short_ntl / (series.dir_long_ntl + series.dir_short_ntl)
-smart_tot = series.smart_long_ntl + series.smart_short_ntl
-series["smart_share"] = (series.smart_short_ntl / smart_tot).where(smart_tot > 0)
+if "smart_long_ntl" in series:      # absent until the next ingest run migrates the view
+    smart_tot = series.smart_long_ntl + series.smart_short_ntl
+    series["smart_share"] = (series.smart_short_ntl / smart_tot).where(smart_tot > 0)
+else:
+    series["smart_share"] = float("nan")
 market = q("SELECT ts, coin, mark_px, funding, open_interest * mark_px AS oi_ntl FROM market_snapshots ORDER BY ts")
 market["dt"] = pd.to_datetime(market.ts, unit="ms", utc=True)
 cov = q("SELECT * FROM coverage").set_index("coin")
