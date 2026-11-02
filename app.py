@@ -6,23 +6,36 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from ingest import COINS, DB, TIER_A, WHALE_NOTIONAL
+from ingest import COINS, DB, MM_TURNOVER, RELVAL_RATIO, TIER_A, WHALE_NOTIONAL
 
 # Dark palette (blue/red diverging pair: CVD-safe, unlike green/red).
 LONG, SHORT = "#3987e5", "#e66767"
 SURFACE, GRID, AXIS, INK, INK2, MUTED = "#1a1a19", "#2c2c2a", "#383835", "#f0efec", "#c3c2b7", "#898781"
+LABELS = {"directional": "Directional", "hedged_on_hl": "Hedged on HL", "relative_value": "Relative value",
+          "market_maker": "Market maker", "vault": "Vault"}
 
 st.set_page_config(page_title="HL Whale Positioning", layout="wide")
 st.markdown(f"""<style>
-.block-container {{padding-top: 2rem; max-width: 1400px;}}
-.card {{background:{SURFACE}; border:1px solid rgba(255,255,255,.08); border-radius:10px; padding:16px 18px;}}
-.card .coin {{color:{INK2}; font-size:.85rem; letter-spacing:.06em;}}
-.card .px {{color:{MUTED}; font-size:.85rem; float:right;}}
-.card .big {{color:{INK}; font-size:2rem; font-weight:600; margin:6px 0 2px;}}
-.card .sub {{color:{MUTED}; font-size:.8rem; line-height:1.5;}}
-.split {{display:flex; gap:2px; height:6px; margin:8px 0 10px;}}
+.block-container {{padding-top: 2.2rem; max-width: 1400px;}}
+.title {{font-size: 1.9rem; font-weight: 700; color: {INK}; line-height: 1.2;}}
+.subtitle {{color: {MUTED}; font-size: .9rem; margin: 2px 0 18px;}}
+.card {{background:{SURFACE}; border:1px solid rgba(255,255,255,.08); border-radius:10px; padding:14px 16px;}}
+.card.sel {{border-color:{INK2};}}
+.card .head {{display:flex; justify-content:space-between; color:{INK2}; font-size:.85rem; letter-spacing:.06em;}}
+.card .head span:last-child {{color:{MUTED}; letter-spacing:0;}}
+.card .big {{color:{INK}; font-size:2.1rem; font-weight:600; margin:4px 0 0; line-height:1.2;}}
+.card .big small {{font-size:.95rem; color:{INK2}; font-weight:400;}}
+.card .delta {{color:{MUTED}; font-size:.8rem;}}
+.split {{display:flex; gap:2px; height:6px; margin:10px 0 12px;}}
 .split div {{border-radius:3px;}}
-.foot {{color:{MUTED}; font-size:.8rem; line-height:1.6; border-top:1px solid {GRID}; padding-top:12px; margin-top:24px;}}
+.stats {{display:grid; grid-template-columns:1fr 1fr; gap:8px 12px;}}
+.stats div {{font-size:.78rem; color:{MUTED}; line-height:1.25;}}
+.stats b {{display:block; font-size:.95rem; color:{INK}; font-weight:500;}}
+.card .foot {{font-size:.75rem; color:{MUTED}; margin-top:10px; padding-top:8px; border-top:1px solid {GRID};}}
+.section {{color:{INK}; font-weight:600; font-size:1rem; margin:8px 0 6px;}}
+.method {{color:{MUTED}; font-size:.82rem; line-height:1.6; border-top:1px solid {GRID}; padding-top:14px; margin-top:28px;}}
+.method ul {{margin:4px 0 0 0; padding-left:18px;}}
+.method b {{color:{INK2};}}
 </style>""", unsafe_allow_html=True)
 
 
@@ -37,7 +50,7 @@ def usd(x):
         return "—"
     for div, s in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
         if abs(x) >= div:
-            return f"${x / div:.1f}{s}"
+            return f"${x / div:.1f}".removesuffix(".0") + s
     return f"${x:.0f}"
 
 
@@ -55,10 +68,14 @@ def style(fig, height=300, title=None, time_axis=True):
     return fig
 
 
+def chart(fig):
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
 # ---------- data ----------
 run = q("SELECT * FROM runs ORDER BY ts DESC LIMIT 1")
 if run.empty:
-    st.warning("No data yet — run `python ingest.py` first.")
+    st.warning("No data yet. Run `python ingest.py` first.")
     st.stop()
 run = run.iloc[0]
 series = q("SELECT * FROM series_a ORDER BY ts")
@@ -71,102 +88,111 @@ cov = q("SELECT * FROM coverage").set_index("coin")
 breadth = q("SELECT * FROM breadth_b").set_index("coin")
 n_tracked = q("SELECT COUNT(*) n FROM wallets WHERE last_checked IS NOT NULL").n[0]
 
-# ---------- header ----------
+# ---------- header + controls ----------
 age_min = (time.time() * 1000 - run.ts) / 60000
-st.markdown(f"<h2 style='margin-bottom:0'>Hyperliquid Whale Positioning</h2>"
-            f"<div style='color:{MUTED}'>Wallets with ≥{usd(WHALE_NOTIONAL)} notional per coin · "
-            f"last run {age_min:.0f} min ago · {int(run.wallets_polled):,} wallets polled "
-            f"({int(run.errors)} errors) · {n_tracked:,} tracked in total</div>",
+updated = pd.to_datetime(run.ts, unit="ms", utc=True).strftime("%b %d, %H:%M UTC")
+st.markdown(f"<div class='title'>Hyperliquid Whale Positioning</div>"
+            f"<div class='subtitle'>BTC, ETH, SOL and HYPE perps · positions ≥ {usd(WHALE_NOTIONAL)} · "
+            f"{n_tracked:,} wallets tracked · updated {updated} ({age_min:.0f} min ago)</div>",
             unsafe_allow_html=True)
-st.write("")
-mode = st.radio("Measure", ["Unhedged directional", "Raw (all wallets)"], horizontal=True,
-                help="Unhedged directional excludes market makers, vaults and relative-value books, "
-                     "and nets shorts against spot/staked holdings on Hyperliquid. See method below.")
-DIR = mode.startswith("Unhedged")
+
+c1, c2, _ = st.columns([2, 2, 3])
+with c1:
+    mode = st.segmented_control(
+        "Measure", ["Unhedged", "Raw"], default="Unhedged",
+        help="Unhedged: excludes market makers, vaults and relative-value books, and nets shorts against "
+             "spot and staked holdings of the same coin on Hyperliquid. Raw: every tracked position.") or "Unhedged"
+with c2:
+    coin = st.segmented_control("Coin", COINS, default=COINS[0]) or COINS[0]
+DIR = mode == "Unhedged"
 L, S, SHARE, OTHER = (("dir_long_ntl", "dir_short_ntl", "dir_share", "raw_share") if DIR
                       else ("long_ntl", "short_ntl", "raw_share", "dir_share"))
-other_name = "raw" if DIR else "unhedged"
-series["short_share"] = series[SHARE]
+other_name = "Raw" if DIR else "Unhedged"
 
-# ---------- KPI cards ----------
-for col, coin in zip(st.columns(len(COINS)), COINS):
-    s = series[series.coin == coin]
-    m = market[market.coin == coin]
+# ---------- coin cards ----------
+for col, c in zip(st.columns(len(COINS)), COINS):
+    s, m = series[series.coin == c], market[market.coin == c]
     if s.empty or m.empty:
-        col.markdown(f"<div class='card'><div class='coin'>{coin}</div><div class='sub'>no data</div></div>",
+        col.markdown(f"<div class='card'><div class='head'><span>{c}</span></div>no data</div>",
                      unsafe_allow_html=True)
         continue
     last, mk = s.iloc[-1], m.iloc[-1]
     ago = s[s.ts <= last.ts - 86_400_000]
-    delta = (f"{(last.short_share - ago.iloc[-1].short_share) * 100:+.1f} pp vs 24h"
-             if not ago.empty else "24h change: collecting history")
-    c = cov.loc[coin] if coin in cov.index else None
-    cov_txt = (f"coverage {c.coverage:.0%} of OI · data age ≤{c.max_age_min:.0f} min"
-               if c is not None and pd.notna(c.coverage) else "coverage —")
-    long_pct = (1 - last.short_share) * 100
-    col.markdown(f"""<div class='card'>
-      <span class='coin'>{coin}</span><span class='px'>${mk.mark_px:,.2f}</span>
-      <div class='big'>{last.short_share:.0%} <span style='font-size:1rem;color:{INK2};font-weight:400'>short</span></div>
+    delta = (f"{(last[SHARE] - ago.iloc[-1][SHARE]) * 100:+.1f} pp vs 24h ago" if not ago.empty
+             else "24h change after 1 day of data")
+    cv = cov.loc[c] if c in cov.index else None
+    b = breadth.loc[c] if c in breadth.index else None
+    b_share = f"{b.short_ntl / (b.long_ntl + b.short_ntl):.0%}" if b is not None else "—"
+    long_pct = (1 - last[SHARE]) * 100
+    col.markdown(f"""<div class='card{" sel" if c == coin else ""}'>
+      <div class='head'><span>{c}</span><span>${mk.mark_px:,.2f}</span></div>
+      <div class='big'>{last[SHARE]:.0%} <small>short</small></div>
+      <div class='delta'>{delta}</div>
       <div class='split'><div style='width:{long_pct}%;background:{LONG}'></div>
         <div style='width:{100 - long_pct}%;background:{SHORT}'></div></div>
-      <div class='sub'>Tier A: {usd(last[L])} long / {usd(last[S])} short · {other_name}: {last[OTHER]:.0%} short<br>
-        {delta}<br>
-        funding {mk.funding * 100:.4f}%/h · {mk.funding * 24 * 365:.1%} APR<br>{cov_txt}</div>
-    </div>""", unsafe_allow_html=True)
+      <div class='stats'>
+        <div><b>{last[OTHER]:.0%}</b>{other_name.lower()} short</div>
+        <div><b>{b_share}</b>short, wallets &lt; {usd(TIER_A)}</div>
+        <div><b>{mk.funding * 24 * 365:.1%}</b>funding APR</div>
+        <div><b>{cv.coverage:.0%}</b>of open interest tracked</div>
+      </div>
+      <div class='foot'>Accounts ≥ {usd(TIER_A)}: {usd(last[L])} long · {usd(last[S])} short</div>
+    </div>""" if cv is not None else "", unsafe_allow_html=True)
 
-st.write("")
-coin = st.radio("Coin", COINS, horizontal=True, label_visibility="collapsed")
-s = series[series.coin == coin]
-m = market[market.coin == coin]
+s, m = series[series.coin == coin], market[market.coin == coin]
 few = len(s) < 2
+mk_mode = "lines+markers" if few else "lines"
+st.write("")
 
 # ---------- time series ----------
 left, right = st.columns([3, 2])
 with left:
     fig = go.Figure()
     for name, ycol, color in (("Long", L, LONG), ("Short", S, SHORT)):
-        fig.add_scatter(x=s.dt, y=s[ycol], name=name, line=dict(color=color, width=2),
-                        mode="lines+markers" if few else "lines", marker=dict(size=8),
-                        hovertemplate="%{y:$.3s}<extra>" + name + "</extra>")
-    st.plotly_chart(style(fig, 340, f"{coin} · Tier-A notional, {mode.lower()} (accounts ≥ {usd(TIER_A)})"),
-                    use_container_width=True)
+        fig.add_scatter(x=s.dt, y=s[ycol], name=name, line=dict(color=color, width=2), mode=mk_mode,
+                        marker=dict(size=8), hovertemplate="%{y:$.3s}<extra>" + name + "</extra>")
+    chart(style(fig, 340, f"{coin} notional, accounts ≥ {usd(TIER_A)} ({mode.lower()})"))
 with right:
-    fig = go.Figure(go.Scatter(x=s.dt, y=s.short_share, line=dict(color=INK2, width=2),
-                               mode="lines+markers" if few else "lines", marker=dict(size=8),
-                               hovertemplate="%{y:.1%}<extra>short share</extra>"))
-    fig.add_hline(y=0.5, line=dict(color=AXIS, dash="dot"))
-    fig.update_yaxes(tickformat=".0%", range=[0, 1])
-    st.plotly_chart(style(fig, 340, "Tier-A short share"), use_container_width=True)
+    fig = go.Figure()
+    fig.add_scatter(x=s.dt, y=s[OTHER], name=other_name, mode=mk_mode, marker=dict(size=8),
+                    line=dict(color=MUTED, width=1.5, dash="dot"),
+                    hovertemplate="%{y:.1%}<extra>" + other_name.lower() + "</extra>")
+    fig.add_scatter(x=s.dt, y=s[SHARE], name=mode, mode=mk_mode, marker=dict(size=8),
+                    line=dict(color=INK, width=2), hovertemplate="%{y:.1%}<extra>" + mode.lower() + "</extra>")
+    lo, hi = min(s[SHARE].min(), s[OTHER].min()), max(s[SHARE].max(), s[OTHER].max())
+    lo, hi = max(lo - 0.05, 0), min(hi + 0.05, 1)
+    if lo < 0.5 < hi:
+        fig.add_hline(y=0.5, line=dict(color=AXIS, width=1))
+    fig.update_yaxes(tickformat=".0%", range=[lo, hi])
+    chart(style(fig, 340, f"{coin} short share"))
 
 if few:
-    st.caption("Time series need ≥2 snapshots — history accumulates every 15 minutes.")
+    st.caption("Time series need at least two snapshots. History builds up every 15 minutes.")
 
 left, right = st.columns(2)
 with left:
-    fig = go.Figure(go.Scatter(x=m.dt, y=m.oi_ntl, line=dict(color=INK2, width=2),
-                               mode="lines+markers" if len(m) < 2 else "lines", marker=dict(size=8),
-                               hovertemplate="%{y:$.3s}<extra>OI</extra>"))
-    st.plotly_chart(style(fig, 260, "Open interest (USD)"), use_container_width=True)
+    fig = go.Figure(go.Scatter(x=m.dt, y=m.oi_ntl, line=dict(color=INK2, width=2), mode=mk_mode,
+                               marker=dict(size=8), hovertemplate="%{y:$.3s}<extra>OI</extra>"))
+    chart(style(fig, 260, f"{coin} open interest (USD)"))
 with right:
-    fig = go.Figure(go.Scatter(x=m.dt, y=m.funding * 24 * 365, line=dict(color=INK2, width=2),
-                               mode="lines+markers" if len(m) < 2 else "lines", marker=dict(size=8),
-                               hovertemplate="%{y:.1%}<extra>funding APR</extra>"))
+    fig = go.Figure(go.Scatter(x=m.dt, y=m.funding * 24 * 365, line=dict(color=INK2, width=2), mode=mk_mode,
+                               marker=dict(size=8), hovertemplate="%{y:.1%}<extra>funding APR</extra>"))
     fig.add_hline(y=0, line=dict(color=AXIS))
     fig.update_yaxes(tickformat=".0%")
-    st.plotly_chart(style(fig, 260, "Funding (annualized)"), use_container_width=True)
+    chart(style(fig, 260, f"{coin} funding (annualized)"))
 
 # ---------- who holds the positions ----------
-LABELS = {"directional": "Directional (unhedged)", "hedged_on_hl": "Hedged on HL (spot/staked)",
-          "relative_value": "Relative value (net-flat book)", "market_maker": "Market maker (≥100x turnover)",
-          "vault": "Vault"}
+BD_NAMES = {"directional": "Directional (unhedged)", "hedged_on_hl": "Hedged on HL (spot/staked)",
+            "relative_value": "Relative value (net-flat book)",
+            "market_maker": f"Market maker (≥{MM_TURNOVER}x turnover)", "vault": "Vault"}
 bd = q("SELECT * FROM breakdown WHERE coin = ?", (coin,))
 if not bd.empty:
     piv = bd.pivot_table(index="label", columns="side", values="ntl", aggfunc="sum").reindex(
-        list(LABELS)[::-1]).fillna(0)
+        list(BD_NAMES)[::-1]).fillna(0)
     for side in ("long", "short"):
         if side not in piv:
             piv[side] = 0.0
-    names = [LABELS[i] for i in piv.index]
+    names = [BD_NAMES[i] for i in piv.index]
     fig = go.Figure()
     fig.add_bar(y=names, x=-piv.short, orientation="h", name="Short", marker_color=SHORT,
                 customdata=piv.short, hovertemplate="%{y}<br>%{customdata:$.3s} short<extra></extra>")
@@ -177,11 +203,11 @@ if not bd.empty:
     m_ = max(piv.long.max(), piv.short.max()) * 1.1
     fig.update_xaxes(range=[-m_, m_], tickvals=[-m_ * 2 / 3, -m_ / 3, 0, m_ / 3, m_ * 2 / 3],
                      ticktext=[usd(m_ * 2 / 3), usd(m_ / 3), "0", usd(m_ / 3), usd(m_ * 2 / 3)])
-    st.plotly_chart(style(fig, 280, f"{coin} · Who holds the positions (all tracked wallets, short ← → long)",
-                          time_axis=False), use_container_width=True)
+    chart(style(fig, 280, f"Who holds the {coin} positions (all tracked wallets, short ← → long)",
+                time_axis=False))
 
 # ---------- liquidation map ----------
-pos = q("SELECT * FROM latest_positions WHERE coin = ? AND position_value >= ?", (coin, WHALE_NOTIONAL))
+pos = q("SELECT * FROM latest_classified WHERE coin = ? AND position_value >= ?", (coin, WHALE_NOTIONAL))
 mark = m.iloc[-1].mark_px if not m.empty else None
 if mark and not pos.empty:
     liq = pos[pos.liq_px.between(mark * 0.7, mark * 1.3)]
@@ -194,52 +220,43 @@ if mark and not pos.empty:
     fig.add_vline(x=mark, line=dict(color=INK, dash="dot"),
                   annotation=dict(text=f"mark ${mark:,.2f}", font=dict(color=INK2)))
     fig.update_layout(barmode="overlay", bargap=0.05, hovermode="closest")
-    st.plotly_chart(style(fig, 320, f"{coin} · Liquidation map (notional at liq price, ±30% of mark, all tracked wallets)",
-                          time_axis=False),
-                    use_container_width=True)
-    st.caption(f"{len(pos) - len(liq)} positions with liq price outside ±30% or none (low leverage / cross margin) not shown.")
+    chart(style(fig, 320, f"{coin} liquidation map (notional at liquidation price, ±30% of mark)",
+                time_axis=False))
+    st.caption(f"Not shown: {len(pos) - len(liq)} positions with no liquidation price within ±30% "
+               "(low leverage or cross margin).")
 
-# ---------- breadth + top positions ----------
-left, right = st.columns([1, 2])
-with left:
-    st.markdown(f"<div style='color:{INK};font-weight:600;margin-bottom:6px'>Tier B breadth (accounts &lt; {usd(TIER_A)})</div>",
-                unsafe_allow_html=True)
-    if coin in breadth.index:
-        b = breadth.loc[coin]
-        share = b.short_ntl / (b.long_ntl + b.short_ntl)
-        st.markdown(f"""<div class='card'><div class='big'>{share:.0%} <span style='font-size:1rem;color:{INK2};font-weight:400'>short</span></div>
-          <div class='split'><div style='width:{(1 - share) * 100}%;background:{LONG}'></div>
-            <div style='width:{share * 100}%;background:{SHORT}'></div></div>
-          <div class='sub'>{usd(b.long_ntl)} long / {usd(b.short_ntl)} short · {int(b.n_wallets)} wallets<br>
-          rotating sample: data up to {b.max_age_min:.0f} min old (notional-weighted {b.ntl_weighted_age_min:.0f} min)</div></div>""",
-                    unsafe_allow_html=True)
-    else:
-        st.caption("No tier-B data yet.")
-with right:
-    st.markdown(f"<div style='color:{INK};font-weight:600;margin-bottom:6px'>Largest {coin} positions</div>",
-                unsafe_allow_html=True)
+# ---------- largest positions ----------
+if not pos.empty:
+    st.markdown(f"<div class='section'>Largest {coin} positions</div>", unsafe_allow_html=True)
     top = pos.sort_values("position_value", ascending=False).head(25)
     st.dataframe(pd.DataFrame({
         "wallet": "https://hypurrscan.io/address/" + top.address,
         "side": top.szi.map(lambda v: "Long" if v > 0 else "Short"),
-        "notional": top.position_value / 1e6, "entry": top.entry_px, "liq": top.liq_px,
+        "wallet type": top.label.map(LABELS),
+        "notional": top.position_value / 1e6,
+        "hedged": (100 * top.hedged_ntl / top.position_value).where(top.szi < 0),
+        "entry": top.entry_px, "liq": top.liq_px,
         "lev": top.leverage.round().astype(int).astype(str) + "x " + top.lev_type,
         "uPnL": top.unrealized_pnl / 1e6, "account": top.acct_value / 1e6,
-        "age (min)": ((run.ts - top.ts) / 60000).round(0),
-    }), hide_index=True, use_container_width=True, height=320, column_config={
+    }), hide_index=True, use_container_width=True, height=360, column_config={
         "wallet": st.column_config.LinkColumn(display_text=r"address/(0x.{6})"),
-        "notional": st.column_config.NumberColumn(format="$%.2fM"),
+        "notional": st.column_config.NumberColumn(format="$%.1fM"),
+        "hedged": st.column_config.ProgressColumn(format="%.0f%%", min_value=0, max_value=100,
+                                                  help="Share of the short covered by spot/staked holdings on HL"),
         "entry": st.column_config.NumberColumn(format="%.2f"),
         "liq": st.column_config.NumberColumn(format="%.2f"),
         "uPnL": st.column_config.NumberColumn(format="$%.2fM"),
-        "account": st.column_config.NumberColumn(format="$%.2fM"),
+        "account": st.column_config.NumberColumn(format="$%.1fM"),
     })
 
-st.markdown(f"""<div class='foot'><b>Method.</b> Wallets are discovered via the public Hyperliquid leaderboard
-(wallets not on it are invisible) and polled via <code>clearinghouseState</code>. Tier A (account ≥ {usd(TIER_A)}) is polled
-every 15 min and drives the time series; tier B rotates and may be hours old. Coverage = tracked whale notional (long + short) / both sides of open interest.
-<b>Unhedged directional</b> excludes vaults, market makers (30-day volume ≥ 100× account value; the distribution has no
-natural break, so this cut is a judgment call) and relative-value books (|net| / gross exposure across all coins &lt; 0.3),
-and nets shorts against spot and staked holdings of the same coin on Hyperliquid. Labels use each wallet's current profile.
-<b>Caveat:</b> hedges held off Hyperliquid (CEX spot, ETFs, other chains) are invisible — "unhedged" means unhedged on
-Hyperliquid, not necessarily a directional bet.</div>""", unsafe_allow_html=True)
+st.markdown(f"""<div class='method'><b>Method</b><ul>
+<li>Wallets come from the public Hyperliquid leaderboard. Wallets that are not on it are invisible; "tracked" shows the
+share of open interest this sample covers (long + short over both sides of OI).</li>
+<li>Accounts ≥ {usd(TIER_A)} are polled every 15 minutes and drive the time series. Smaller accounts rotate and can be up
+to about an hour old.</li>
+<li><b>Unhedged</b> drops vaults, market makers (30-day volume ≥ {MM_TURNOVER}× account value) and relative-value books
+(|net| / gross exposure across all coins &lt; {RELVAL_RATIO}), and nets shorts against spot and staked holdings of the same
+coin on Hyperliquid. The turnover distribution has no natural break, so the market-maker cut is a judgment call.</li>
+<li>Labels use each wallet's current profile, also for past snapshots. Hedges held off Hyperliquid (exchange spot, ETFs,
+other chains) don't show up, so "unhedged" means unhedged on Hyperliquid.</li>
+</ul></div>""", unsafe_allow_html=True)
