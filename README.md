@@ -21,6 +21,7 @@ All of this comes from a day and a half of a quiet market. Read it as a descript
 ## Dashboard
 
 - **Coin cards:** short share (unhedged or raw), 24h change, funding, open interest coverage, data age
+- **What this means:** a few plain sentences on the selected coin, built by fixed rules from the numbers on the page (`explain.py`), plus a line under each chart on how to read it
 - **Tier-A time series:** long and short notional, short share
 - **Open interest and funding**, each on its own chart
 - **Who holds the positions:** notional by wallet label, shorts to the left, longs to the right
@@ -108,6 +109,7 @@ python collector.py       # trade-stream wallet discovery; keep it running
 python backup.py          # gzip snapshot to backups/, keeps 14
 python sensitivity.py     # threshold sensitivity grid
 python healthcheck.py     # phone alert via ntfy.sh when the pipeline stops (needs NTFY_TOPIC)
+python alerts.py          # research alerts after each run: positioning shifts, $10M+ whale trades
 streamlit run app.py      # dashboard
 ```
 

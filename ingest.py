@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots(
 CREATE TABLE IF NOT EXISTS wallets(
   address TEXT PRIMARY KEY, account_value REAL, first_seen INTEGER, last_checked INTEGER,
   last_error INTEGER, gross_ntl REAL, net_ntl REAL, turnover REAL, is_vault INTEGER,
-  holdings_checked INTEGER, source TEXT, turnover_checked INTEGER);
+  holdings_checked INTEGER, source TEXT, turnover_checked INTEGER, prev_checked INTEGER);
 -- Spot + staked balance (coin units) per wallet, latest only; used to net out on-HL hedges.
 CREATE TABLE IF NOT EXISTS holdings(
   address TEXT, coin TEXT, amount REAL, PRIMARY KEY(address, coin));
@@ -155,7 +155,7 @@ def init_db(db):
                        ("wallets", "turnover REAL"), ("wallets", "is_vault INTEGER"),
                        ("wallets", "holdings_checked INTEGER"), ("wallets", "source TEXT"),
                        ("positions", "label_pit TEXT"), ("positions", "hedged_pit REAL"),
-                       ("wallets", "turnover_checked INTEGER")):
+                       ("wallets", "turnover_checked INTEGER"), ("wallets", "prev_checked INTEGER")):
         if col.split()[0] not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     db.executescript(VIEWS)
@@ -337,8 +337,9 @@ def main():
                                 p["leverage"]["type"],
                                 float(p["liquidationPx"]) if p["liquidationPx"] else None,
                                 float(p["unrealizedPnl"]), float(p["marginUsed"]), acct))
-            db.execute("UPDATE wallets SET last_checked=?, account_value=?, gross_ntl=?, net_ntl=? "
-                       "WHERE address=?", (now, acct, gross, net, addr))
+            # prev_checked lets alerts.py compare only wallets polled in both runs
+            db.execute("UPDATE wallets SET prev_checked=last_checked, last_checked=?, account_value=?, gross_ntl=?, "
+                       "net_ntl=? WHERE address=?", (now, acct, gross, net, addr))
             if polled % 50 == 0:  # short write transactions so the collector can insert
                 db.commit()
             if polled % 500 == 0:

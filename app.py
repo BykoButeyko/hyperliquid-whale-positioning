@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from explain import explain
 from ingest import COINS, DB, MM_TURNOVER, RELVAL_RATIO, TIER_A, WHALE_NOTIONAL
 
 # Dark palette (blue/red diverging pair: CVD-safe, unlike green/red).
@@ -36,6 +37,11 @@ st.markdown(f"""<style>
 .method {{color:{MUTED}; font-size:.82rem; line-height:1.6; border-top:1px solid {GRID}; padding-top:14px; margin-top:28px;}}
 .method ul {{margin:4px 0 0 0; padding-left:18px;}}
 .method b {{color:{INK2};}}
+.explain {{background:{SURFACE}; border-left:3px solid {INK2}; border-radius:6px; padding:14px 18px; margin-top:14px;}}
+.explain b {{color:{INK}; font-size:.95rem;}}
+.explain p {{color:{INK2}; font-size:.95rem; line-height:1.6; margin:6px 0 8px;}}
+.explain span {{color:{MUTED}; font-size:.78rem;}}
+.how {{color:{MUTED}; font-size:.8rem; line-height:1.5; margin:-6px 0 18px;}}
 </style>""", unsafe_allow_html=True)
 
 
@@ -70,6 +76,11 @@ def style(fig, height=300, title=None, time_axis=True):
 
 def chart(fig):
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def how(text):
+    """One line under a chart that says how to read it."""
+    st.markdown(f"<div class='how'>{text}</div>", unsafe_allow_html=True)
 
 
 # ---------- data ----------
@@ -149,6 +160,20 @@ if RANGES[span]:
     s, m = s[s.ts >= since], m[m.ts >= since]
 few = len(s) < 2
 mk_mode = "lines+markers" if few else "lines"
+
+# ---------- what this means ----------
+full = series[series.coin == coin]
+bd = q("SELECT * FROM breakdown WHERE coin = ?", (coin,))
+if not full.empty and not m.empty:
+    last = full.iloc[-1]
+    ago = full[full.ts <= last.ts - 86_400_000]
+    shorts = bd[bd.side == "short"].ntl.sum()
+    hedged = bd[bd.label == "hedged_on_hl"].ntl.sum()
+    lines = explain(coin, last, ago.iloc[-1] if not ago.empty else None, s.dir_share,
+                    m.iloc[-1].funding * 24 * 365, hedged / shorts if shorts else 0, span)
+    st.markdown(f"<div class='explain'><b>What this means for {coin}</b><p>{' '.join(lines)}</p>"
+                "<span>A description of current positions, not a forecast. Hedges held off Hyperliquid "
+                "don't show up.</span></div>", unsafe_allow_html=True)
 st.write("")
 
 # ---------- time series ----------
@@ -159,6 +184,7 @@ with left:
         fig.add_scatter(x=s.dt, y=s[ycol], name=name, line=dict(color=color, width=2), mode=mk_mode,
                         marker=dict(size=8), hovertemplate="%{y:$.3s}<extra>" + name + "</extra>")
     chart(style(fig, 340, f"{coin} notional, accounts ≥ {usd(TIER_A)} ({mode.lower()})"))
+    how("Total value of long and short positions held by accounts above $1M. The gap between the lines is their net lean.")
 with right:
     fig = go.Figure()
     fig.add_scatter(x=s.dt, y=s[OTHER], name=other_name, mode=mk_mode, marker=dict(size=8),
@@ -172,6 +198,7 @@ with right:
         fig.add_hline(y=0.5, line=dict(color=AXIS, width=1))
     fig.update_yaxes(tickformat=".0%", range=[lo, hi])
     chart(style(fig, 340, f"{coin} short share"))
+    how("Share of that value that is short; above 50% means more short than long. The dotted line shows the other measure.")
 
 if few:
     st.caption("Time series need at least two snapshots. History builds up every 15 minutes.")
@@ -181,18 +208,19 @@ with left:
     fig = go.Figure(go.Scatter(x=m.dt, y=m.oi_ntl, line=dict(color=INK2, width=2), mode=mk_mode,
                                marker=dict(size=8), hovertemplate="%{y:$.3s}<extra>OI</extra>"))
     chart(style(fig, 260, f"{coin} open interest (USD)"))
+    how("Value of all open positions in this coin on Hyperliquid, from every trader, not only the large ones.")
 with right:
     fig = go.Figure(go.Scatter(x=m.dt, y=m.funding * 24 * 365, line=dict(color=INK2, width=2), mode=mk_mode,
                                marker=dict(size=8), hovertemplate="%{y:.1%}<extra>funding APR</extra>"))
     fig.add_hline(y=0, line=dict(color=AXIS))
     fig.update_yaxes(tickformat=".0%")
     chart(style(fig, 260, f"{coin} funding (annualized)"))
+    how("What longs pay shorts per year to hold positions (negative: shorts pay longs). Hyperliquid's default is about 11%; above it, the market crowds into longs.")
 
 # ---------- who holds the positions ----------
 BD_NAMES = {"directional": "Directional (unhedged)", "hedged_on_hl": "Hedged on HL (spot/staked)",
             "relative_value": "Relative value (net-flat book)",
             "market_maker": f"Market maker (≥{MM_TURNOVER}x turnover)", "vault": "Vault"}
-bd = q("SELECT * FROM breakdown WHERE coin = ?", (coin,))
 if not bd.empty:
     piv = bd.pivot_table(index="label", columns="side", values="ntl", aggfunc="sum").reindex(
         list(BD_NAMES)[::-1]).fillna(0)
@@ -212,6 +240,7 @@ if not bd.empty:
                      ticktext=[usd(m_ * 2 / 3), usd(m_ / 3), "0", usd(m_ / 3), usd(m_ * 2 / 3)])
     chart(style(fig, 280, f"Who holds the {coin} positions (all tracked wallets, short ← → long)",
                 time_axis=False))
+    how("Only the Directional row is a bet on price. The other rows are market making, vault strategies, net-flat books and shorts backed by spot or staked coins.")
 
 # ---------- liquidation map ----------
 pos = q("SELECT * FROM latest_classified WHERE coin = ? AND position_value >= ?", (coin, WHALE_NOTIONAL))
@@ -229,12 +258,14 @@ if mark and not pos.empty:
     fig.update_layout(barmode="overlay", bargap=0.05, hovermode="closest")
     chart(style(fig, 320, f"{coin} liquidation map (notional at liquidation price, ±30% of mark)",
                 time_axis=False))
+    how("If price reaches a bar, those positions get force-closed. Large clusters can speed a move up as the forced orders hit the book.")
     st.caption(f"Not shown: {len(pos) - len(liq)} positions with no liquidation price within ±30% "
                "(low leverage or cross margin).")
 
 # ---------- largest positions ----------
 if not pos.empty:
     st.markdown(f"<div class='section'>Largest {coin} positions</div>", unsafe_allow_html=True)
+    how("Click a wallet to open it on hypurrscan. Hedged shows how much of a short is covered by spot or staked coins in the same wallet.")
     top = pos.sort_values("position_value", ascending=False).head(25)
     st.dataframe(pd.DataFrame({
         "wallet": "https://hypurrscan.io/address/" + top.address,
