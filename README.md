@@ -22,6 +22,8 @@ Data from 2026-11-01 02:10 UTC to 2026-11-10 03:15 UTC, 869 snapshots. All four 
 
 All of this comes from nine days of one market direction. Read it as a description of the sample, and don't trade on it.
 
+I asked the same question on the TradFi side, about US spot bitcoin ETFs and hedge-fund shorts on CME: [How much of the bitcoin ETF bid is a basis trade?](https://bykobuteyko.com/research/bitcoin-etf-basis/)
+
 ## Dashboard
 
 - **Coin cards:** short share (unhedged or raw), 24h change, funding, open interest coverage, data age
