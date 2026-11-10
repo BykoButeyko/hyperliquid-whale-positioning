@@ -4,19 +4,23 @@ I wanted to know how the large wallets on Hyperliquid sit in BTC, ETH, SOL and H
 
 This repo polls about 4,000 large wallets every 15 minutes, stores every position worth $10k or more, and labels each wallet. The dashboard then splits positions into unhedged directional exposure, market makers, vaults, relative-value books and shorts hedged on Hyperliquid.
 
-## What the first 36 hours show
+## What the first nine days show
 
-Data from 2026-11-01 01:44 UTC to 2026-11-02 12:30 UTC, 143 snapshots.
+Data from 2026-11-01 02:10 UTC to 2026-11-10 03:15 UTC, 869 snapshots. All four coins fell over the period: BTC 3.9%, ETH 6.5%, SOL 10% and HYPE 16%.
 
-**A few accounts drive the "whales are short" story.** My first test run covered the 200 largest accounts and found BTC 76% short. Widen it to the ~275 accounts above $1M and the figure falls to 59%. Across every tracked wallet with a $50k+ position it is 52%. On the full sample ETH (49%), HYPE (45%) and SOL (51%) sit close to even.
+**A few accounts drive the "whales are short" story.** My first test run covered the 200 largest accounts and found BTC 76% short. Among the accounts above $1M it is 62%, and across every tracked wallet with a $50k+ position it is 52%. On the full sample ETH (51%), SOL (52%) and HYPE (49%) sit close to even.
 
-**Two thirds of the big HYPE shorts are hedges.** Wallets hold spot or staked HYPE against $470M of the $705M in whale-size HYPE shorts. They collect staking yield and carry no price risk. Net those hedges out and the $1M+ group goes from 50% short to 26% short, so the traders with real exposure lean long.
+**Two thirds of the big HYPE shorts are hedges.** Wallets hold spot or staked HYPE against $479M of the $695M in whale-size HYPE shorts. They collect staking yield and carry no price risk. Net those hedges out and the $1M+ group goes from 52% short to 31% short, so the traders with real exposure lean long.
 
-**Market makers don't explain the BTC short skew.** I removed market makers, vaults, relative-value books and on-chain hedges, and the $1M+ group moved from 59% to 62% short. Market makers hold more BTC long than short, so dropping them pushes the share up. Most of the largest BTC shorts trade 1 to 4 times their account value per month, run net short across all their positions and hold no BTC on Hyperliquid. They could be betting on a drop, or hedging spot they hold on an exchange or in an ETF. On-chain data can't tell the two apart.
+**Market makers don't explain the BTC short skew.** I removed market makers, vaults, relative-value books and on-chain hedges, and the $1M+ group moved from 62% to 67% short. Market makers hold more BTC long than short, so dropping them pushes the share up. Most of the largest BTC shorts trade 1 to 4 times their account value per month, run net short across all their positions and hold no BTC on Hyperliquid. They could be betting on a drop, or hedging spot they hold on an exchange or in an ETF. On-chain data can't tell the two apart.
 
-**Positioning held steady.** For each coin the short share stayed inside a 2-point band over 36 hours (BTC 58.7% to 60.7%). I expect changes in notional, and behaviour around volatile days, to say more than the level.
+**The big accounts shorted into the sell-off.** ETH went from 48% to 56% short among $1M+ accounts and HYPE from 47% to 52%. BTC moved inside a 9-point band (55.5% to 64.7%). Longs and shorts in one coin reprice together, so a falling price alone doesn't move the share.
 
-All of this comes from a day and a half of a quiet market. Read it as a description of the sample, and don't trade on it.
+**Wallets with a track record lean further short.** Directional accounts that made $1M+ before the last 30 days hold 76% of their BTC exposure short, 68% of ETH and 85% of SOL, but only 21% of HYPE.
+
+**One early signal.** In the hour after a $1M+ account changed a position by $10M or more, price moved 56 bps in that direction on average (31 events, p < 0.001 against random timestamps with the same direction mix, `event_study.py`). Positioning shifts and the profitable cohort showed nothing. One falling market, overlapping events and twelve tested pairs make this a lead to recheck, not a result.
+
+All of this comes from nine days of one market direction. Read it as a description of the sample, and don't trade on it.
 
 ## Dashboard
 
@@ -81,16 +85,16 @@ I also checked two places a hedge could hide. HYPE liquid staking tokens (KHYPE,
 
 **I picked the 100× market-maker cut by hand.** Turnover among wallets with $50k+ positions follows one smooth, log-normal curve, with no gap between market makers and active traders. 100× catches the top 8% or so. I chose the 0.3 relative-value cut the same way.
 
-To check whether those choices drive the results, `sensitivity.py` reruns the tier-A numbers over a grid of six market-maker cuts (30× to no filter) and four relative-value cuts (0.2 to no filter). On the 2026-11-02 snapshot:
+To check whether those choices drive the results, `sensitivity.py` reruns the tier-A numbers over a grid of six market-maker cuts (30× to no filter) and four relative-value cuts (0.2 to no filter). On the 2026-11-10 evening snapshot:
 
 | Coin | Raw short share | Unhedged, across all 24 combinations |
 |---|---|---|
-| BTC | 59.2% | 57.6% to 62.0% |
-| ETH | 49.0% | 47.3% to 50.2% |
-| SOL | 54.3% | 48.5% to 54.6% |
-| HYPE | 50.2% | 22.1% to 30.3% |
+| BTC | 59.6% | 59.9% to 66.2% |
+| ETH | 57.1% | 56.6% to 61.6% |
+| SOL | 63.8% | 63.7% to 68.4% |
+| HYPE | 54.3% | 24.8% to 32.6% |
 
-No combination flips a conclusion. BTC stays short-heavy, ETH stays even, and HYPE stays far below its raw figure, because hedges drive that gap and the thresholds move it by a few points at most.
+No combination flips a conclusion. BTC, ETH and SOL stay short-heavy, and HYPE stays far below its raw figure, because hedges drive that gap and the thresholds move it by a few points at most.
 
 ### Limitations
 
