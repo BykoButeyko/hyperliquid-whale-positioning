@@ -20,10 +20,19 @@ LABELS = {"directional": "Directional", "hedged_on_hl": "Hedged on HL", "relativ
 
 st.set_page_config(page_title="HL Whale Positioning", layout="wide")
 st.markdown(f"""<style>
-.block-container {{padding-top: 2.2rem; max-width: 1400px;}}
-.title {{font-size: 1.9rem; font-weight: 700; color: {INK}; line-height: 1.2;}}
-.subtitle {{color: {MUTED}; font-size: .9rem; margin: 2px 0 18px;}}
-.card {{background:{SURFACE}; border:1px solid rgba(255,255,255,.08); border-radius:10px; padding:14px 16px;}}
+.block-container {{padding-top: 2.6rem; max-width: 1400px;}}
+.kicker {{font-size:.75rem; letter-spacing:.12em; text-transform:uppercase; color:{MUTED}; margin-bottom:6px;}}
+.kicker a {{color:{MUTED}; text-decoration:none;}}
+.kicker a:hover {{color:{INK};}}
+.title {{font-size: 2.2rem; font-weight: 700; color: {INK}; line-height: 1.15; letter-spacing: -.02em;}}
+.subtitle {{color: {MUTED}; font-size: .9rem; margin: 6px 0 14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}}
+.live {{width:8px; height:8px; border-radius:50%; background:#4fb286; box-shadow:0 0 0 3px rgba(79,178,134,.25);}}
+.btns {{display:flex; gap:10px; margin:0 0 22px;}}
+.btns a {{padding:6px 13px; border:1px solid {GRID}; border-radius:8px; color:{INK2}; font-size:.85rem; text-decoration:none;}}
+.btns a:hover {{border-color:{MUTED}; color:{INK};}}
+.card {{background:{SURFACE}; border:1px solid {GRID}; border-radius:12px; padding:14px 16px; transition:border-color .15s;}}
+.card:hover {{border-color:{AXIS};}}
+[data-testid="stPlotlyChart"] {{border:1px solid {GRID}; border-radius:12px; overflow:hidden;}}
 .card.sel {{border-color:{INK2};}}
 .card .head {{display:flex; justify-content:space-between; color:{INK2}; font-size:.85rem; letter-spacing:.06em;}}
 .card .head span:last-child {{color:{MUTED}; letter-spacing:0;}}
@@ -40,7 +49,7 @@ st.markdown(f"""<style>
 .method {{color:{MUTED}; font-size:.82rem; line-height:1.6; border-top:1px solid {GRID}; padding-top:14px; margin-top:28px;}}
 .method ul {{margin:4px 0 0 0; padding-left:18px;}}
 .method b {{color:{INK2};}}
-.explain {{background:{SURFACE}; border-left:3px solid {INK2}; border-radius:6px; padding:14px 18px; margin-top:14px;}}
+.explain {{background:{SURFACE}; border:1px solid {GRID}; border-left:3px solid #7fb0ef; border-radius:10px; padding:14px 18px; margin-top:14px;}}
 .explain b {{color:{INK}; font-size:.95rem;}}
 .explain p {{color:{INK2}; font-size:.95rem; line-height:1.6; margin:6px 0 8px;}}
 .explain span {{color:{MUTED}; font-size:.78rem;}}
@@ -111,9 +120,12 @@ n_tracked = q("SELECT COUNT(*) n FROM wallets WHERE last_checked IS NOT NULL").n
 # ---------- header + controls ----------
 age_min = (time.time() * 1000 - run.ts) / 60000
 updated = pd.to_datetime(run.ts, unit="ms", utc=True).strftime("%b %d, %H:%M UTC")
-st.markdown(f"<div class='title'>Hyperliquid Whale Positioning</div>"
-            f"<div class='subtitle'>BTC, ETH, SOL and HYPE perps · positions ≥ {usd(WHALE_NOTIONAL)} · "
-            f"{n_tracked:,} wallets tracked · updated {updated} ({age_min:.0f} min ago)</div>",
+st.markdown(f"<div class='kicker'><a href='https://bykobuteyko.com'>Byko Buteyko</a> · Hyperliquid perps research</div>"
+            f"<div class='title'>Hyperliquid Whale Positioning</div>"
+            f"<div class='subtitle'><span class='live'></span>BTC, ETH, SOL and HYPE perps · positions ≥ {usd(WHALE_NOTIONAL)} · "
+            f"{n_tracked:,} wallets tracked · updated {updated} ({age_min:.0f} min ago)</div>"
+            "<div class='btns'><a href='https://bykobuteyko.com/research/hyperliquid-whales/'>Read the research note</a>"
+            "<a href='https://github.com/BykoButeyko/hyperliquid-whale-positioning'>Code and method</a></div>",
             unsafe_allow_html=True)
 
 c1, c2, c3, _ = st.columns([2, 2, 2, 1])
