@@ -120,7 +120,7 @@ n_tracked = q("SELECT COUNT(*) n FROM wallets WHERE last_checked IS NOT NULL").n
 # ---------- header + controls ----------
 age_min = (time.time() * 1000 - run.ts) / 60000
 updated = pd.to_datetime(run.ts, unit="ms", utc=True).strftime("%b %d, %H:%M UTC")
-st.markdown(f"<div class='kicker'><a href='https://bykobuteyko.com'>Byko Buteyko</a> · Hyperliquid perps research</div>"
+st.markdown(f"<div class='kicker'><a href='https://bykobuteyko.com'>Byko Buteyko</a></div>"
             f"<div class='title'>Hyperliquid Whale Positioning</div>"
             f"<div class='subtitle'><span class='live'></span>BTC, ETH, SOL and HYPE perps · positions ≥ {usd(WHALE_NOTIONAL)} · "
             f"{n_tracked:,} wallets tracked · updated {updated} ({age_min:.0f} min ago)</div>"
