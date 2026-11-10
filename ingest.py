@@ -180,11 +180,13 @@ def init_db(db):
         if col.split()[0] not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     db.executescript(VIEWS)
-    # Rebuild the cache from scratch whenever the view's columns change.
+    # Rebuild the cache from scratch whenever the view's columns change. Built full, never empty:
+    # the dashboard reads it while this run is still polling.
     cols = lambda t: [r[1] for r in db.execute(f"PRAGMA table_info({t})")]
     if cols("series_a_cache") != cols("series_a"):
         db.execute("DROP TABLE IF EXISTS series_a_cache")
-        db.execute("CREATE TABLE series_a_cache AS SELECT * FROM series_a WHERE 0")
+        db.execute("CREATE TABLE series_a_cache AS SELECT * FROM series_a")
+        db.commit()
 
 
 def refresh_series_cache(db):
