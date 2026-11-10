@@ -92,7 +92,8 @@ if run.empty:
     st.warning("No data yet. Run `python ingest.py` first.")
     st.stop()
 run = run.iloc[0]
-series = q("SELECT * FROM series_a ORDER BY ts")
+has_cache = not q("SELECT 1 FROM sqlite_master WHERE name = 'series_a_cache'").empty
+series = q(f"SELECT * FROM {'series_a_cache' if has_cache else 'series_a'} ORDER BY ts")
 series["dt"] = pd.to_datetime(series.ts, unit="ms", utc=True)
 series["raw_share"] = series.short_ntl / (series.long_ntl + series.short_ntl)
 series["dir_share"] = series.dir_short_ntl / (series.dir_long_ntl + series.dir_short_ntl)

@@ -86,9 +86,10 @@ DROP VIEW IF EXISTS breakdown;
 
 -- A wallet's positions as of its last successful poll (absent = flat or < ${STORE_NOTIONAL}).
 -- Wallets whose most recent poll failed are excluded until the next success.
+-- CROSS JOIN pins the order (wallets first, then a key lookup); otherwise SQLite scans all of positions.
 CREATE VIEW latest_positions AS
-  SELECT p.* FROM positions p
-  JOIN wallets w ON p.address = w.address AND p.ts = w.last_checked
+  SELECT p.* FROM wallets w
+  CROSS JOIN positions p ON p.address = w.address AND p.ts = w.last_checked
   WHERE w.last_error IS NULL OR w.last_error < w.last_checked;
 
 -- Every position with a wallet label and its on-HL hedged notional.
@@ -102,8 +103,11 @@ CREATE VIEW classified AS
   JOIN wallets w ON w.address = p.address;
 
 CREATE VIEW latest_classified AS
-  SELECT c.* FROM classified c
-  JOIN wallets w ON c.address = w.address AND c.ts = w.last_checked
+  SELECT p.*,
+    COALESCE(p.label_pit, {LABEL_SQL}) AS label,
+    COALESCE(p.hedged_pit, {HEDGE_SQL}) AS hedged_ntl
+  FROM wallets w
+  CROSS JOIN positions p ON p.address = w.address AND p.ts = w.last_checked
   WHERE w.last_error IS NULL OR w.last_error < w.last_checked;
 
 -- Time series: tier A only (polled every run -> consistent 15-min data). Notional in USD.
@@ -176,6 +180,19 @@ def init_db(db):
         if col.split()[0] not in {r[1] for r in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     db.executescript(VIEWS)
+    # Rebuild the cache from scratch whenever the view's columns change.
+    cols = lambda t: [r[1] for r in db.execute(f"PRAGMA table_info({t})")]
+    if cols("series_a_cache") != cols("series_a"):
+        db.execute("DROP TABLE IF EXISTS series_a_cache")
+        db.execute("CREATE TABLE series_a_cache AS SELECT * FROM series_a WHERE 0")
+
+
+def refresh_series_cache(db):
+    """Append finished runs to series_a_cache. The view re-aggregates all history (half a minute
+    and growing), the dashboard reads this table instead. Rows before label stamping existed are
+    frozen with the labels they had when the cache was first built."""
+    last = db.execute("SELECT COALESCE(MAX(ts), 0) FROM series_a_cache").fetchone()[0]
+    db.execute("INSERT INTO series_a_cache SELECT * FROM series_a WHERE ts > ?", (last,))
 
 session = requests.Session()
 _lock, _next = threading.Lock(), [0.0]
@@ -372,6 +389,7 @@ def main():
                "FROM wallets w WHERE w.address = p.address AND p.ts = ?", (now,))
 
     db.execute("INSERT INTO runs VALUES(?,?,?,?)", (now, polled, errors, round(time.time() - t0, 1)))
+    refresh_series_cache(db)
     db.commit()
     print(f"done: {polled} wallets, {errors} errors, {time.time() - t0:.0f}s")
 
