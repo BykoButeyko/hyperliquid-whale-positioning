@@ -25,8 +25,8 @@ st.markdown(f"""<style>
 .kicker a {{color:{MUTED}; text-decoration:none;}}
 .kicker a:hover {{color:{INK};}}
 .title {{font-size: 2.2rem; font-weight: 700; color: {INK}; line-height: 1.15; letter-spacing: -.02em;}}
-.subtitle {{color: {MUTED}; font-size: .9rem; margin: 6px 0 14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}}
-.live {{width:8px; height:8px; border-radius:50%; background:#4fb286; box-shadow:0 0 0 3px rgba(79,178,134,.25);}}
+.subtitle {{color: {MUTED}; font-size: .9rem; margin: 6px 0 14px;}}
+.live {{display:inline-block; width:8px; height:8px; margin:0 9px 1px 3px; vertical-align:middle; border-radius:50%; background:#4fb286; box-shadow:0 0 0 3px rgba(79,178,134,.25);}}
 .btns {{display:flex; gap:10px; margin:0 0 22px;}}
 .btns a {{padding:6px 13px; border:1px solid {GRID}; border-radius:8px; color:{INK2}; font-size:.85rem; text-decoration:none;}}
 .btns a:hover {{border-color:{MUTED}; color:{INK};}}
