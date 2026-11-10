@@ -1,6 +1,7 @@
 """Streamlit dashboard for hl_whales.db.  Run: streamlit run app.py"""
 import sqlite3
 import time
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -18,7 +19,8 @@ SURFACE, GRID, AXIS, INK, INK2, MUTED = "#1a1a19", "#2c2c2a", "#383835", "#f0efe
 LABELS = {"directional": "Directional", "hedged_on_hl": "Hedged on HL", "relative_value": "Relative value",
           "market_maker": "Market maker", "vault": "Vault"}
 
-st.set_page_config(page_title="HL Whale Positioning", layout="wide")
+st.set_page_config(page_title="Hyperliquid Whale Positioning · Byko Buteyko",
+                   page_icon=str(Path(__file__).with_name(".streamlit") / "icon.png"), layout="wide")
 st.markdown(f"""<style>
 .block-container {{padding-top: 2.6rem; max-width: 1400px;}}
 .kicker {{font-size:.75rem; letter-spacing:.12em; text-transform:uppercase; color:{MUTED}; margin-bottom:6px;}}
