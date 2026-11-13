@@ -117,6 +117,7 @@ python backup.py          # gzip snapshot to backups/, keeps 14
 python sensitivity.py     # threshold sensitivity grid
 python healthcheck.py     # phone alert via ntfy.sh when the pipeline stops (needs NTFY_TOPIC)
 python alerts.py          # research alerts after each run: positioning shifts, $10M+ whale trades
+python traffic.py         # daily visit counts for the site and dashboard from the Caddy log
 python event_study.py     # forward returns after positioning signals vs random timestamps
 pip install pytest && pytest   # tests for the dashboard text and the alert rules
 streamlit run app.py      # dashboard
